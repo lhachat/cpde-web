@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16
+    container_name: cpde-db
+    environment:
+      POSTGRES_DB: cpde
+      POSTGRES_USER: cpde
+      POSTGRES_PASSWORD: localdev
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./ddl:/docker-entrypoint-initdb.d:ro
+
+volumes:
+  pgdata:
