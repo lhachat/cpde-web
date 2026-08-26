@@ -1,0 +1,38 @@
+{
+  "client": "DEMO",
+  "effective_from": "2026-01-01",
+  "calibration_version": "demo-1",
+  "_warning": "CDA-SIDE ONLY. Price differentials are engine IP. Never load into a client-facing database.",
+  "markets": [
+    {
+      "code": "GSS",
+      "name": "Ground Systems & Sensors",
+      "price_differential": -0.041
+    },
+    {
+      "code": "ACP",
+      "name": "Airborne Comms & Processing",
+      "price_differential": 0.0007
+    },
+    {
+      "code": "MSN",
+      "name": "Mission Networks",
+      "price_differential": 0.0
+    },
+    {
+      "code": "SUS",
+      "name": "Sustainment & Depot",
+      "price_differential": -0.018
+    },
+    {
+      "code": "SPC",
+      "name": "Space Payloads",
+      "price_differential": 0.025
+    },
+    {
+      "code": "TRN",
+      "name": "Training & Simulation",
+      "price_differential": 0.027
+    }
+  ]
+}

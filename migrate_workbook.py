@@ -28,6 +28,11 @@ SH_AOP = ('Phased Opp, Budget, Rev Plan', 7, 2, 56)   # sheet, header row, first
 SH_PWIN = ('Pursuits Pwins', 1, 1, 26)
 SH_PWIN_DEP = ('Pursuits Pwins Dependent', 1, 1, 25)
 SH_STAFF = ('StaffingData', 1, 1, 98)
+# Dashboard Table5 -- annual operating plan. Read the TABLE, not the display
+# grid on C3:G8: the table carries every year (2026-2033 here, unsorted),
+# while the grid shows only five from the planning year. The schema has no
+# five-year ceiling, so take them all.
+SH_PLAN = ('Dashboard', 1, 27, 8)
 
 # Questionnaire column -> question code
 Q_MAP = OrderedDict([
@@ -64,16 +69,27 @@ MAX_YEARS = 5   # workbook ceiling; DB has none
 
 
 # ---------------------------------------------------------------------
-def read_table(wb, spec, limit=500):
+def read_table(wb, spec, limit=500, stop_on_blank=True):
+    """Read a header row plus its data rows.
+
+    stop_on_blank=False scans the whole range instead of stopping at the
+    first empty row. Dashboard Table5 needs this: its header is on row 1
+    but the data does not start until row 22, so stopping at the first
+    blank silently returns nothing.
+    """
     sheet, hdr_row, first_col, ncols = spec
     ws = wb[sheet]
     headers = [ws.cell(hdr_row, c).value for c in range(first_col, first_col + ncols)]
     out = []
     r = hdr_row + 1
-    while r < hdr_row + limit:
+    end = min(hdr_row + limit, ws.max_row + 1) if not stop_on_blank else hdr_row + limit
+    while r < end:
         vals = [ws.cell(r, c).value for c in range(first_col, first_col + ncols)]
         if all(v is None for v in vals):
-            break
+            if stop_on_blank:
+                break
+            r += 1
+            continue
         out.append(dict(zip(headers, vals)))
         r += 1
     return out
@@ -111,6 +127,7 @@ def extract(path, issues):
     pwin_rows = read_table(wb, SH_PWIN)
     dep_rows = read_table(wb, SH_PWIN_DEP)
     staff_rows = read_table(wb, SH_STAFF)
+    plan_rows = read_table(wb, SH_PLAN, stop_on_blank=False)
 
     def keyed(rows, label):
         d = {}
@@ -179,10 +196,60 @@ def extract(path, issues):
         if ct and ct not in CONTRACT_MAP:
             issues.add('ERROR', f'UID {u}', f'unknown Contract Type {ct!r}')
 
-    markets = sorted({r.get('Market') for r in aop.values() if r.get('Market')} |
-                     {r.get('Market') for r in pwin.values() if r.get('Market')})
+    # MARKET AUTHORITY: the Pwin sheet, not AOP.
+    # The two sheets disagree on most rows in the demo workbook, and the
+    # Pwin sheet's value is the one the ENGINE scored against -- so it is
+    # the only value consistent with the stored Pwin. Taking AOP's would
+    # produce a market breakdown that does not reconcile with the Pwins.
+    for u, r in pwin.items():
+        if not r.get('Market'):
+            issues.add('ERROR', f'UID {u}', 'no Market on the Pwin sheet')
+    a_mk = {u: r.get('Market') for u, r in aop.items()}
+    mism = [u for u in pwin if u in a_mk and a_mk[u] != pwin[u].get('Market')]
+    if mism:
+        issues.add('WARN', 'market',
+                   f'{len(mism)} pursuit(s) disagree between AOP and Pwin sheets; '
+                   f'using the Pwin sheet value')
+    blank_aop = [u for u, m in a_mk.items() if not m]
+    if blank_aop:
+        issues.add('WARN', 'market',
+                   f'{len(blank_aop)} pursuit(s) have no Market on AOP; '
+                   f'resolved from the Pwin sheet')
 
-    return {'aop': aop, 'pwin': pwin, 'dep': dep, 'staff': staff,
+    markets = sorted({r.get('Market') for r in pwin.values() if r.get('Market')})
+
+    # --- annual operating plan -------------------------------------
+    plan = {}
+    for r in plan_rows:
+        y = r.get('Year')
+        if not isinstance(y, int):
+            continue
+        vals = {'esc': r.get('EscalationRate'),
+                'rev': r.get('Revenue Target'),
+                'fee': r.get('Fee Target'),
+                'bp': r.get('Budgeted B&P'),
+                'inv': r.get('Budgeted Investment'),
+                'ccr': r.get('Current Contract Revenue'),
+                'ccf': r.get('Current Contract Fee')}
+        # A row of zeros is a placeholder, not a plan. Skip it and say so.
+        if not any(vals[k] for k in ('rev', 'fee', 'bp', 'inv')):
+            issues.add('WARN', f'plan {y}', 'all targets zero or blank -- skipped')
+            continue
+        if y in plan:
+            issues.add('ERROR', f'plan {y}', 'duplicate year in Dashboard table')
+        plan[y] = vals
+
+    if not plan:
+        issues.add('WARN', 'plan', 'no annual targets found -- dashboard '
+                                   'variances will be meaningless')
+    else:
+        yrs = sorted(plan)
+        gaps = [y for y in range(yrs[0], yrs[-1] + 1) if y not in plan]
+        if gaps:
+            issues.add('WARN', 'plan',
+                       f'missing year(s) {gaps} between {yrs[0]} and {yrs[-1]}')
+
+    return {'aop': aop, 'pwin': pwin, 'dep': dep, 'staff': staff, 'plan': plan,
             'markets': markets, 'aop_headers': list(aop_rows[0]) if aop_rows else []}
 
 
@@ -292,13 +359,13 @@ def load(conn, data, args, issues):
             (client_id, bu_id,
              str(a.get('Opportunity ID')) if a.get('Opportunity ID') is not None else None,
              a.get('Opportunity Name') or f'UID {uid}',
-             market_ids.get(a.get('Market')),
+             market_ids.get(p.get('Market') or a.get('Market')),
              opp_ids.get(OPPTYPE_MAP.get(a.get('Opportunity Type'))),
              ctr_ids.get(CONTRACT_MAP.get(p.get('Contract Type'))),
              stage_ids.get(STAGE_MAP.get(a.get('Phase'))),
              bool(a.get('Sole Source')),
              p.get('Bidders'),
-             BID_MAP.get(a.get('Bid/NoBid')),
+             'BID' if args.force_bid else BID_MAP.get(a.get('Bid/NoBid')),
              a.get('Planned Total Award Value'), a.get('Planned Fee'),
              p.get('Invest %'),
              a.get('Min B&P'), a.get('Max B&P'), a.get('Planned Investment'),
@@ -415,6 +482,24 @@ def load(conn, data, args, issues):
                        VALUES (%s,%s,%s)""",
                     (pid, s.get('Effective_BP_Pct'), args.engine_version))
 
+    # --- annual operating plan (targets the pipeline is measured against)
+    for y, v in sorted(data['plan'].items()):
+        cur.execute("""
+            INSERT INTO plan_year (org_node_id, calendar_year, escalation_rate,
+                revenue_target, fee_target, budgeted_bp, budgeted_investment,
+                current_contract_revenue, current_contract_fee)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (org_node_id, calendar_year) DO UPDATE SET
+                escalation_rate          = EXCLUDED.escalation_rate,
+                revenue_target           = EXCLUDED.revenue_target,
+                fee_target               = EXCLUDED.fee_target,
+                budgeted_bp              = EXCLUDED.budgeted_bp,
+                budgeted_investment      = EXCLUDED.budgeted_investment,
+                current_contract_revenue = EXCLUDED.current_contract_revenue,
+                current_contract_fee     = EXCLUDED.current_contract_fee""",
+            (bu_id, y, v['esc'], v['rev'], v['fee'], v['bp'], v['inv'],
+             v['ccr'], v['ccf']))
+
     conn.commit()
     return pursuit_ids
 
@@ -445,6 +530,10 @@ def main():
     ap.add_argument('--business', default='Demo Business')
     ap.add_argument('--business-unit', default='Demo Business Unit')
     ap.add_argument('--engine-version', default='0.23')
+    ap.add_argument('--force-bid', action='store_true',
+                    help='Load every pursuit as Bid, ignoring the workbook '
+                         'Bid/NoBid column. Narrowing the pipeline is the '
+                         "tool's job in the demo, not the data's.")
     args = ap.parse_args()
 
     issues = Issue()
@@ -452,10 +541,22 @@ def main():
 
     print(f'Parsed: {len(data["aop"])} AOP, {len(data["pwin"])} Pwin, '
           f'{len(data["dep"])} Pwin_Dep, {len(data["staff"])} StaffingData')
-    print(f'Markets: {data["markets"]}')
     deps = [(u, r.get("Dependent UID")) for u, r in data['pwin'].items()
             if r.get('Dependent UID')]
     print(f'Dependencies: {deps}')
+    nb = sum(1 for r in data['aop'].values() if r.get('Bid/NoBid') == 'No Bid')
+    if args.force_bid and nb:
+        print(f'--force-bid: {nb} No Bid pursuit(s) will load as Bid')
+    mk = sorted({r.get('Market') for r in data['pwin'].values() if r.get('Market')})
+    print(f'Markets (from Pwin sheet): {mk}')
+    pl = data['plan']
+    if pl:
+        yrs = sorted(pl)
+        print(f'Plan years: {len(pl)} ({yrs[0]}-{yrs[-1]})  '
+              f'revenue targets {min(pl[y]["rev"] for y in yrs):,.0f}'
+              f'-{max(pl[y]["rev"] for y in yrs):,.0f}')
+        ccr = sum(1 for y in yrs if pl[y]['ccr'])
+        print(f'  other contract revenue populated in {ccr} of {len(pl)} years')
 
     errs = issues.report()
 

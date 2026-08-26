@@ -61,6 +61,10 @@ INSERT INTO labor_category (code, label, category_group, display_order) VALUES (
 INSERT INTO labor_category (code, label, category_group, display_order) VALUES ('REVGOLD','Reviewers (Gold Team)','review',18);
 
 -- ---------- questionnaire v1 ----------
+-- Section grouping matches PwinForm layout. PP1 and P1 both number from 1
+-- because they open new sections (Past Performance, Price).
+ALTER TABLE question ADD COLUMN IF NOT EXISTS section TEXT;
+
 INSERT INTO questionnaire_version (code, version_no, engine_version, effective_from, is_active, notes)
 VALUES ('pwin', 1, '0.23', DATE '2026-01-01', TRUE,
         'Extracted from workbook v2.15 / engine v0.23. Option engine_value
@@ -73,19 +77,32 @@ SELECT id, 'TM1B', 2, '(varies by opportunity type -- see question_prompt_varian
 INSERT INTO question (questionnaire_version_id, code, display_order, prompt_text, answer_type, is_required)
 SELECT id, 'TM2', 3, '2.  Is there an incumbent?', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
 INSERT INTO question (questionnaire_version_id, code, display_order, prompt_text, answer_type, is_required)
-SELECT id, 'TM3', 4, '3.  Incumbent past performance', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
+SELECT id, 'TM3', 4, '3.  Is the incumbent well-performing?', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
 INSERT INTO question (questionnaire_version_id, code, display_order, prompt_text, answer_type, is_required)
-SELECT id, 'TM4', 5, '4.  Will we outsource the work requested?', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
+SELECT id, 'TM4', 5, '4.  Will we need a teammate in order to bid key aspects of the job?', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
 INSERT INTO question (questionnaire_version_id, code, display_order, prompt_text, answer_type, is_required)
-SELECT id, 'TM5', 6, '5.  Customer relationship strength', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
+SELECT id, 'TM5', 6, '5.  Do we plan to invest (other than B&P) to increase competitiveness prior to RFP release?', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
 INSERT INTO question (questionnaire_version_id, code, display_order, prompt_text, answer_type, is_required)
-SELECT id, 'INVEST_PCT', 7, 'Investment percentage', 'numeric', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
+SELECT id, 'INVEST_PCT', 7, 'Investment percentage (fraction of award value)', 'numeric', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
 INSERT INTO question (questionnaire_version_id, code, display_order, prompt_text, answer_type, is_required)
-SELECT id, 'PP1', 8, 'PP1.  Do we have relevant past performance?', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
+SELECT id, 'PP1', 8, '1.  Do we have any performance issues on similar contracts within the last 3 years?', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
 INSERT INTO question (questionnaire_version_id, code, display_order, prompt_text, answer_type, is_required)
-SELECT id, 'P1', 9, 'P1.  Bid price position relative to normal', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
+SELECT id, 'P1', 9, '1.  How far above/below a normal bid are we planning for this proposal?', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
 INSERT INTO question (questionnaire_version_id, code, display_order, prompt_text, answer_type, is_required)
-SELECT id, 'P2', 10, 'P2.  Source selection method', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
+SELECT id, 'P2', 10, '2.  Is this Best Value or LPTA?', 'single_select', TRUE FROM questionnaire_version WHERE code='pwin' AND version_no=1;
+
+
+-- section assignment
+UPDATE question SET section='Technical & Management' WHERE code='TM1A';
+UPDATE question SET section='Technical & Management' WHERE code='TM1B';
+UPDATE question SET section='Technical & Management' WHERE code='TM2';
+UPDATE question SET section='Technical & Management' WHERE code='TM3';
+UPDATE question SET section='Technical & Management' WHERE code='TM4';
+UPDATE question SET section='Technical & Management' WHERE code='TM5';
+UPDATE question SET section='Technical & Management' WHERE code='INVEST_PCT';
+UPDATE question SET section='Past Performance' WHERE code='PP1';
+UPDATE question SET section='Price' WHERE code='P1';
+UPDATE question SET section='Price' WHERE code='P2';
 
 -- variant prompt text (TM1A / TM1B only)
 INSERT INTO question_prompt_variant (question_id, type_group, prompt_text)
@@ -304,9 +321,11 @@ SELECT qt.id, qp.id, opt.id, 'DISABLE'
 --              here per decision 2026-08-17. If the engine ever
 --              string-matches this option and fails, the trailing space
 --              is the first thing to check.
--- SEED-NOTE-2  Question prompt_text for TM2..P2 is PARAPHRASED. The
---              workbook stores prompts in PwinForm control captions,
---              not in modDropdowns. Replace with the real captions.
+-- SEED-NOTE-2  RESOLVED 2026-08-17. Question prompt_text is now the
+--              verbatim PwinForm control caption, recovered from the
+--              vbaProject.bin form stream. TM1A/TM1B variant prompts are
+--              in question_prompt_variant. Do not reword without
+--              creating a new questionnaire_version.
 -- SEED-NOTE-3  INVEST_PCT is a numeric answer (confirmed 2026-08-17).
 --              Stored as a fraction, 0..1. VBA derives it via
 --              modAOP.InvestmentPercent(); the web app accepts it as a
