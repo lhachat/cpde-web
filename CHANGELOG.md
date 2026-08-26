@@ -9,6 +9,72 @@ it does.
 
 ---
 
+## [0.1.1] — 2026-08-25
+
+Scope enforcement built and verified. Both isolation layers now proven
+rather than assumed: **41 assertions passing across two suites.**
+
+### Added
+
+- **`ddl/07_scope.sql`** — the canonical scope predicate.
+  - `fn_user_pursuits(user_id)` — the one predicate every pursuit query
+    must use. `fn_user_visible_org_nodes` already returned org nodes, but
+    nothing turned that into a pursuit filter, so each query would have
+    written its own and the one that forgot would be a silent cross-BU
+    leak.
+  - `fn_user_has_scope(user_id, org_node_id)` — for admin delegation: an
+    admin may grant access only at or below their own node.
+  - Deliberately **not** `SECURITY DEFINER`. The functions run as the
+    caller, so RLS still applies beneath them. That is what stops a scope
+    assignment pointing at a foreign node from resolving.
+  - `is_active` semantics documented: deactivating a node hides its whole
+    subtree, because the recursion cannot reach children through an
+    inactive parent. Shutting a business unit shuts its divisions.
+- **`test_scope.py`** — 12 assertions. Downward inheritance from the
+  business node, narrow scope excluding, scope not crossing tenants, a
+  foreign scope assignment being inert, `is_active` cutting a subtree, and
+  scope failing closed without tenant context. **12/12 passing.**
+
+### Verified
+
+| Suite | Assertions | Result |
+|---|---|---|
+| `test_isolation.py` — tenant isolation (RLS) | 29 | pass |
+| `test_scope.py` — business-unit scope | 12 | pass |
+
+Cross-tenant scope protection holds because RLS makes foreign `org_node`
+rows invisible before the recursive CTE reaches them. Sound, and now
+tested — the failure mode to watch is someone marking these functions
+`SECURITY DEFINER` for performance, which would quietly remove it.
+
+### Changed
+
+- Scope filtering moved out of Known gaps.
+- `test_setup.sql` now also underpins the scope suite; `test_scope.py`
+  creates a division-scoped user of its own.
+
+### Known gaps (unchanged from 0.1.0 except where noted)
+
+- No API layer. The prototype still reads embedded JSON.
+- **Tests are not automated.** They pass on demand; nothing runs them on
+  commit. A suite that protects you is one that cannot be skipped.
+- No audit trigger. `audit_log` exists; nothing writes to it.
+- No licensing enforcement.
+- Staffing month-spreading in the prototype remains unchecked against
+  `staffing_phaser.py`.
+- Two AERO pursuits reassigned from BMC2A to MSN in the database only;
+  their stored Pwins were computed against BMC2A's differential.
+- `06_plan_year.sql` superseded by `migrate_workbook.py`; delete it.
+
+### Note
+
+`test_scope.py` temporarily deactivates AERO's business unit to prove the
+subtree is cut, then restores it. If the run dies inside that group the
+node stays inactive and the tenant looks empty. One UPDATE to fix, but
+worth knowing.
+
+---
+
 ## [0.1.0] — 2026-08-25
 
 First tagged version. The database is real, tested and loaded with two
@@ -130,9 +196,6 @@ tenants. The front end is still a static prototype with no backend.
 ### Known gaps
 
 - No API layer. The prototype reads embedded JSON, not the database.
-- **Scope filtering is untested.** `fn_user_visible_org_nodes` exists but
-  nothing exercises it. `aero.bu2@demoaero.test` is scoped to a BU holding
-  zero pursuits and should see nothing — unverified.
 - No audit trigger. `audit_log` exists; nothing writes to it.
 - No licensing enforcement. Deliberately kept out of the access path.
 - Staffing month-spreading in the prototype is an assumption, not checked
@@ -146,7 +209,8 @@ tenants. The front end is still a static prototype with no backend.
 
 ## Versioning notes
 
-- **0.1.x** — database and prototype. Schema may break between patches.
+- **0.1.x** — database, security and prototype. Schema may break between
+  patches.
 - **0.2.0** — API layer and the prototype reading live data.
 - **0.3.0** — authentication and scope enforcement.
 - **1.0.0** — first production deployment for a paying client.
