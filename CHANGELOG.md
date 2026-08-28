@@ -9,6 +9,205 @@ it does.
 
 ---
 
+## [0.2.0] — 2026-08-28
+
+The API layer, a live UI reading from the database instead of embedded
+JSON, the Black Hat/PTW assessment forms, and a real (not stubbed) engine
+integration for Recalculate Pwin. Originally scoped in the 0.2.0
+versioning note below as just "API layer and the prototype reading live
+data" — it grew well past that as write endpoints, audit, presence and
+the two competitive-analysis paths all turned out to depend on each
+other. **146 assertions passing across four suites.**
+
+### Added
+
+- **FastAPI backend** (`api/app/`), served alongside the static UI from
+  one origin so the session cookie needs no CORS negotiation.
+  - Session-cookie auth (`auth.py`), dev-mode email-only login behind
+    `CPDE_DEV_LOGIN`. Tenant context is resolved server-side from the
+    session only — never from a request parameter, header, or body
+    field. **Tested**: forged `client_id` in the query string, a header,
+    and an alternate header all fail to move a session out of its real
+    tenant (`test_api_security.py` group 3).
+  - **`bootstrap.py`** — single-call full-portfolio payload. The live UI
+    now reads this instead of an embedded JSON blob; every view's
+    filtering/sorting/aggregation logic is unchanged, only the data
+    source moved.
+  - **`portfolio.py`** — scoped reads: `/pursuits`, `/pursuits/{id}`,
+    `/dashboard`, `/reference` (dropdown source data, codes only — a
+    client never sees or sends a foreign key).
+  - **`staffing.py`** — the FTE phasing model as an API, matching the
+    prototype's month-spreading exactly.
+- **Write endpoints** (`write.py`), all sharing one discipline: tenant
+  from session, scope re-checked on every id (RLS separates companies,
+  not business units — an endpoint that skips the scope predicate is a
+  classic IDOR), 404 (not 403) for out-of-scope, only whitelisted fields
+  ever reach an `UPDATE`.
+  - `PATCH /pursuits/{id}` — general field edits, reference codes
+    resolved to ids server-side so a smuggled foreign-tenant key simply
+    doesn't resolve.
+  - `PATCH /pursuits/{id}/bid` — the bid toggle, its own endpoint rather
+    than a field on the general PATCH so it gets its own audit signature.
+  - `POST /pursuits/{id}/outcome` — closing/reopening a pursuit, with a
+    guard requiring `bid_decision='BID'` before WON/LOST can be recorded
+    (`also_set_bid` to change both deliberately in one call).
+  - `PUT /plan-years/{year}` — admin/executive only; a capture manager
+    cannot move the bar their own pipeline is measured against.
+- **Optimistic concurrency** — `PATCH /pursuits/{id}` accepts
+  `expected_updated_at`; a write against a row that moved since the
+  client last read it is rejected with 409 and the name of who changed
+  it, rather than silently overwriting their edit.
+- **Audit trail** — database-level, not application code. `fn_audit()`
+  trigger on every write-relevant table, `audit_log` with
+  before/after `changed_fields`. `updated_by`/`updated_at` surfaced in
+  the UI as "last edited by"; `GET /pursuits/{id}/history` is
+  deliberately not admin-only (accountability, not surveillance) while
+  the portfolio-wide `GET /audit` is.
+- **Presence** (`pursuit_presence`) — advisory only, never a lock.
+  Heartbeat on open, swept opportunistically on the next heartbeat
+  anywhere in the tenant, TTL-based rather than requiring an explicit
+  close.
+- **Black Hat and PTW assessment forms**, replacing the "not built in
+  this version" placeholder. Two modes on one form (`bhptw.py`):
+  - Black Hat computes fee (`fee.py`: `contract_type.base_fee_rate` + the
+    chosen P1 option's `price_delta`) and records a price-aggressiveness
+    choice; PTW takes margin (capped 30%) and bid price as a direct
+    override of the fee formula.
+  - Both write the analyst-entered Pwin to `base_pwin`, require an
+    existing `QUESTIONNAIRE` assessment to exist first, and require both
+    `BASE` and `DEPENDENT_WON` scenarios for a dependent pursuit
+    (`black_hat_ptw_complete` only flips true once every scenario the
+    pursuit actually needs is satisfied).
+  - **Neither path calls the engine** — confirmed against
+    `BuildInputJson_`/`CallPwinEngine_` in the VBA: by this phase a real
+    competitive analysis has already happened outside the system, and
+    the engine's questionnaire-based score has nothing further to add.
+    `/v1/run` is Pre-BH-questionnaire-only.
+  - `ddl/13_bhptw_fee.sql` — `contract_type.base_fee_rate`,
+    `question_option.price_delta`. P1 deltas seeded directly (the value
+    is literally the percentage in the option's label); contract-type
+    rates seeded from `fee_config.py` in `cda-engine`, confirmed against
+    every Post-BH pursuit in the loaded AERO data.
+- **Real Recalculate Pwin** — the Pre-BH questionnaire path, replacing
+  the `alert()` stub in both the pursuit detail view and the sandbox.
+  - **`api/app/scoring.py`** — full port of `CPwinScoringTables.Lookup()`
+    (all eight questions: TM1a, TM1b, TM2, TM3, TM4, TM5, PP1, P1), not
+    just the P1 slice Black Hat needed. Verified against the VBA's own
+    `SmokeTest()` (11/11) and, independently, against three real AERO
+    pursuits' stored answers — reproduced their exact stored
+    tech/mgmt/pp/price/cprice, including the TM5 quirk where its price
+    delta writes onto `client_price` (not `comp_price`) with the sign
+    flipped.
+  - **`api/app/fee.py`** — fee resolution factored out and shared between
+    Black Hat and Recalculate Pwin so the two computations can't drift
+    apart from each other.
+  - **`api/app/engine_client.py`** — the HTTP client for `POST /v1/run`.
+    Confirmed the request/response shape by reading
+    `cda_engine/runtime/api.py` and `pwin_engine.py` directly, not
+    assumed from the VBA (the VBA's answer-scoring entry point,
+    `compute_pwin_from_answers()`, is disabled in the current engine —
+    scores must be pre-computed by the caller, which is what
+    `scoring.py` is for). Synthetic "Avg Co N" competitors (fixed
+    85/85/85 scores, one per bidder) confirmed against `BuildInputJson_`
+    — competitor identity is out of scope client-side by design
+    (`ddl/01_schema.sql` NOTE-3), and always was.
+  - **Sandbox preview vs. the real pursuit path** — the sandbox's
+    hypothetical, unsaved answer edits needed a fundamentally different
+    call than the pursuit detail's real recalculation: `recalculate_pwin()`
+    takes an optional `answers_override` and a `persist` flag.
+    `persist=False` (the sandbox) never writes to `pwin_assessment` and
+    skips the Pre-BH stage guard, since there's nothing to regress; the
+    real path (`persist=True`) does both.
+  - **Guard against regressing a Post-BH/PTW pursuit** — recalculating
+    would otherwise flip `is_current` back onto a new `QUESTIONNAIRE`
+    row, silently overwriting a Black Hat/PTW pursuit's higher-precision
+    analyst-entered assessment with a lower-precision engine one. Blocked
+    with a 400, checked once in `recalculate_pwin()` itself so both the
+    HTTP endpoint and `write.py`'s sole-source-toggle-off path get it.
+  - `write.py`'s sole-source-toggle-off path now attempts a real
+    recalculation instead of only setting `pwin_needs_recalc` — that flag
+    existed specifically because this integration didn't exist yet
+    (see that file's own comment history). Falls back to the flag only
+    if the recalculation attempt itself fails.
+- **Test suite growth**: `test_api_security.py` gained sections for
+  Black Hat/PTW (IDOR, tenant-forgery, role, business-rule checks) and
+  for Recalculate Pwin (same, plus the Post-BH/sole-source/closed guards
+  and the answers-preview validation).
+
+### Fixed
+
+- **`pursuit_history`'s FK-label resolver assumed every `FK_LOOKUP`
+  column was a UUID** (`id = ANY(%s::uuid[])`). `contract_type_id`,
+  `opportunity_type_id` and `pipeline_stage_id` are `SMALLSERIAL`, not
+  UUID — viewing a pursuit's history after any stage/contract/opportunity
+  type change 500'd. Fixed once, correctly, by casting the *column* to
+  text instead of the parameter to `uuid[]` (`id::text = ANY(%s)`) — a
+  single shared query template, so the fix covers every `FK_LOOKUP`
+  column by construction, not just the one that happened to be exercised
+  first. (This surfaced twice in this cycle's own working notes, once
+  during the BH/PTW work and again during Recalculate Pwin — same bug,
+  not two; the second mention was a re-report of an already-comprehensive
+  fix, not a second narrow patch. `test_api_security.py`'s new "pursuit_history
+  resolves every FK column type" check locks this in by changing a
+  uuid-keyed and three smallint-keyed columns in one PATCH, rather than
+  testing one column at a time.)
+- **`ddl/12_sole_source_pwin.sql` existed but had never been applied** to
+  the running database — `pwin_assessment.is_sole_source_pwin` did not
+  exist, meaning every "turn sole source on" write had been silently
+  failing with a database error since that migration was written, with
+  nothing surfacing the failure. Applied it; verified the full sole
+  source on → off → real-recalculation cycle end-to-end.
+  Lesson: a migration file existing in `ddl/` is not evidence it ran —
+  Postgres only executes `docker-entrypoint-initdb.d` scripts against an
+  empty data directory, so anything added after first init needs to be
+  applied by hand and confirmed, the same way `13_bhptw_fee.sql` was.
+
+### Verified
+
+| Suite | Assertions | Result |
+|---|---|---|
+| `test_isolation.py` — tenant isolation (RLS) | 29 | pass |
+| `test_scope.py` — business-unit scope | 12 | pass |
+| `test_integrity.py` — data integrity | 41 | pass (1 warning, non-fatal) |
+| `test_api_security.py` — API-layer security | 64 | pass |
+
+The one warning: 20 pursuits sitting at Post-BH/Post-PTW whose
+`assessment_type` is still `QUESTIONNAIRE` — data migrated from the
+workbook before this schema distinguished the three types, and (per
+`11_assessment_type.sql`'s own comment) not retroactively recoverable.
+Expected, not a regression.
+
+All UI-facing work (BH/PTW forms, Recalculate Pwin, the sandbox preview)
+verified by actually driving the app end-to-end (Playwright against a
+real Chromium instance), not just by reading the diff — consistent with
+the two worst bugs of the previous cycle (a raw-newline syntax error, an
+SVG rotation error) both having looked correct on paper.
+
+### Known gaps (unchanged from 0.1.1 except where noted)
+
+- **No AWS SSM/IAM secret resolution.** `client.engine_secret_ref` is
+  still only a reference; `engine_client.py`'s local dev sends
+  `CPDE_ENGINE_API_KEY` if set, or no key at all — which the engine's own
+  documented fallback (unresolved client → default config) handles, but
+  real per-client secret resolution via SSM is separate follow-up work,
+  flagged in that module's own docstring.
+- **`pwin_assessment.blended_pwin`** (the dependency-blend math combining
+  a `BASE` and `DEPENDENT_WON` assessment) is still not computed anywhere
+  in this codebase — Recalculate Pwin writes `pwin = base_pwin` directly
+  for a non-dependent pursuit and leaves `pwin` NULL (flagging
+  `pwin_needs_recalc`) for a dependent one, rather than inventing the
+  blend formula.
+- Two AERO pursuits reassigned from BMC2A to MSN in the database only;
+  their stored Pwins were computed against BMC2A's differential.
+- `06_plan_year.sql` superseded by `migrate_workbook.py`; delete it.
+- **Tests are still not automated** on commit.
+- No licensing enforcement.
+- Dashboard pie/combo charts, duplicate-pursuit detection, the
+  change-polling banner, and staffing escalation modeling remain
+  unbuilt (see the working brief's backlog).
+
+---
+
 ## [0.1.1] — 2026-08-25
 
 Scope enforcement built and verified. Both isolation layers now proven

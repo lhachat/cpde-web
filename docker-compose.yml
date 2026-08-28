@@ -1,16 +1,64 @@
+# Local development stack: Postgres plus the API.
+#
+#   docker compose up -d          start both, detached
+#   docker compose logs -f api    follow API logs
+#   docker compose restart api    restart just the API
+#   docker compose down           stop (data survives)
+#   docker compose down -v        stop AND WIPE the database
+#
+# Both services carry restart: unless-stopped, so they come back after a
+# reboot or a Docker Desktop restart and do not depend on a terminal
+# staying open.
+
 services:
   db:
     image: postgres:16
     container_name: cpde-db
+    restart: unless-stopped
     environment:
       POSTGRES_DB: cpde
       POSTGRES_USER: cpde
       POSTGRES_PASSWORD: localdev
     ports:
-      - "5433:5432"
+      - "5433:5432"          # host 5433: 5432 is taken by another container
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./ddl:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # The API must not start against a database that is still initialising,
+      # or its connection pool fails on the first request.
+      test: ["CMD-SHELL", "pg_isready -U cpde -d cpde"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./api
+      dockerfile: ../docker/Dockerfile
+    container_name: cpde-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Inside the compose network the database is reachable as `db:5432`,
+      # NOT localhost:5433 -- that mapping only exists on the host.
+      CPDE_DSN: postgresql://cpde_api:localdev_api@db:5432/cpde
+      CPDE_ORIGINS: http://localhost:8001
+      CPDE_DEV_LOGIN: "1"
+      # Local dev target for the Pwin engine (POST /v1/run), overriding
+      # client.engine_base_url's production value. host.docker.internal
+      # reaches the cda-engine-local container's host-mapped port 8420 --
+      # cda-engine-local and cpde-api are not on the same compose network.
+      CPDE_ENGINE_URL: http://host.docker.internal:8420
+    ports:
+      - "8001:8001"
+    volumes:
+      # Source is mounted, not baked in, so edits on the host reload the
+      # container without a rebuild.
+      - ./api/app:/srv/app:ro
+      - ./api/static:/srv/static:ro
 
 volumes:
   pgdata:

@@ -33,6 +33,10 @@ SH_STAFF = ('StaffingData', 1, 1, 98)
 # while the grid shows only five from the planning year. The schema has no
 # five-year ceiling, so take them all.
 SH_PLAN = ('Dashboard', 1, 27, 8)
+# Dashboard!B1 holds the planning year. year_offset 1 == this year, so
+# calendar_year = planning_year + year_offset - 1. Without it every
+# year-based rollup silently returns nothing.
+CELL_PLANNING_YEAR = ('Dashboard', 1, 2)
 
 # Questionnaire column -> question code
 Q_MAP = OrderedDict([
@@ -128,6 +132,14 @@ def extract(path, issues):
     dep_rows = read_table(wb, SH_PWIN_DEP)
     staff_rows = read_table(wb, SH_STAFF)
     plan_rows = read_table(wb, SH_PLAN, stop_on_blank=False)
+
+    sheet, row, col = CELL_PLANNING_YEAR
+    planning_year = wb[sheet].cell(row, col).value
+    if not isinstance(planning_year, int):
+        issues.add('ERROR', 'planning year',
+                   f'Dashboard!B1 is {planning_year!r}, expected a year. '
+                   f'Year projections cannot be dated without it.')
+        planning_year = None
 
     def keyed(rows, label):
         d = {}
@@ -250,6 +262,7 @@ def extract(path, issues):
                        f'missing year(s) {gaps} between {yrs[0]} and {yrs[-1]}')
 
     return {'aop': aop, 'pwin': pwin, 'dep': dep, 'staff': staff, 'plan': plan,
+            'planning_year': planning_year,
             'markets': markets, 'aop_headers': list(aop_rows[0]) if aop_rows else []}
 
 
@@ -446,13 +459,15 @@ def load(conn, data, args, issues):
             }
             if all(v in (None, 0) for v in vals.values()):
                 continue
+            cal = (data['planning_year'] + y - 1) if data['planning_year'] else None
             cur.execute("""
                 INSERT INTO pursuit_year_projection
-                    (pursuit_id, year_offset, billable_contract_days,
+                    (pursuit_id, year_offset, calendar_year,
+                     billable_contract_days,
                      probabilistic_revenue, probabilistic_fee, bp_days,
                      bp_required, planned_investment)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (pid, y, vals['billable_contract_days'],
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (pid, y, cal, vals['billable_contract_days'],
                  vals['probabilistic_revenue'], vals['probabilistic_fee'],
                  vals['bp_days'], vals['bp_required'], vals['planned_investment']))
 
@@ -544,6 +559,9 @@ def main():
     deps = [(u, r.get("Dependent UID")) for u, r in data['pwin'].items()
             if r.get('Dependent UID')]
     print(f'Dependencies: {deps}')
+    py = data.get('planning_year')
+    print(f'Planning year: {py}  -> projections dated '
+          f'{py}-{py+4}' if py else 'Planning year: MISSING')
     nb = sum(1 for r in data['aop'].values() if r.get('Bid/NoBid') == 'No Bid')
     if args.force_bid and nb:
         print(f'--force-bid: {nb} No Bid pursuit(s) will load as Bid')

@@ -1,0 +1,2438 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CPDE &mdash; Competitive Pipeline Decision Engine</title>
+<style>
+:root{
+  --black:#0D0D0D; --black-2:#1C1C1C; --black-3:#2B2B2B;
+  --accent:#3B6D11; --accent-dk:#2C5209; --accent-lt:#C5DCA8; --accent-tint:#EAF3DE;
+  --canvas:#F5F5F5; --surface:#FFFFFF; --line:#E0E0E0; --line-2:#EEEEEE;
+  --ink:#333333; --ink-2:#555555; --ink-3:#888888;
+  --warn:#8A6A17; --warn-bg:#FBF4E2; --bad:#8C2F27; --good:#3B6D11;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--canvas);color:var(--ink);
+  font-family:"Aptos","Segoe UI",system-ui,-apple-system,sans-serif;
+  font-size:13px;line-height:1.45;-webkit-font-smoothing:antialiased}
+.num{font-variant-numeric:tabular-nums;
+  font-family:ui-monospace,"Cascadia Mono",Consolas,monospace}
+.app{display:flex;min-height:100vh}
+.side{width:214px;flex:0 0 214px;background:var(--black);color:#BFBFBF;
+  display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+.brand{padding:18px 18px 15px;border-bottom:1px solid #2B2B2B}
+.brand h1{margin:0;font-size:15px;letter-spacing:.22em;color:#fff;font-weight:600}
+.brand span{display:block;margin-top:3px;font-size:9.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--accent-lt)}
+.nav{padding:10px 0;flex:1;overflow:auto}
+.nav-lbl{padding:14px 18px 5px;font-size:9px;letter-spacing:.16em;
+  text-transform:uppercase;color:#6E6E6E}
+.nav a{display:block;padding:7px 18px;color:#BFBFBF;text-decoration:none;
+  font-size:12.5px;border-left:2px solid transparent;cursor:pointer}
+.nav a:hover{background:#1C1C1C;color:#fff}
+.nav a.on{background:var(--black-3);color:#fff;border-left-color:var(--accent-lt)}
+.side-ft{padding:13px 18px;border-top:1px solid #2B2B2B;font-size:10.5px;color:#6E6E6E}
+.main{flex:1;min-width:0}
+.top{background:var(--surface);border-bottom:1px solid var(--line);
+  padding:0 22px;display:flex;align-items:center;gap:16px;height:52px;
+  position:sticky;top:0;z-index:6}
+.top h2{margin:0;font-size:15.5px;font-weight:600;letter-spacing:-.01em}
+.tools{margin-left:auto;display:flex;gap:7px;align-items:center}
+.chip{border:1px solid var(--line);background:#fff;border-radius:var(--r);
+  padding:4px 10px;font-size:12px;color:var(--ink-2);cursor:pointer}
+.chip.on{background:var(--black);color:#fff;border-color:var(--black)}
+select,input[type=number],input[type=text]{font:inherit;border:1px solid var(--line);
+  border-radius:var(--r);padding:4px 7px;background:#fff;color:var(--ink)}
+select:focus,input:focus{outline:2px solid var(--accent-lt);outline-offset:-1px}
+.body{padding:18px 22px 44px}
+.view{display:none}.view.on{display:block}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:10px;margin-bottom:14px}
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px}
+.kpi .k{font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-3)}
+.kpi .v{font-size:22px;font-weight:600;margin-top:4px;letter-spacing:-.02em}
+.kpi .s{font-size:11px;color:var(--ink-2);margin-top:2px}
+.kpi.hl{border-top:2px solid var(--accent)}
+.kpi .up{color:var(--good)}.kpi .dn{color:var(--bad)}
+.grid{display:grid;gap:11px}
+.g2{grid-template-columns:1fr 1fr}
+.g23{grid-template-columns:1.3fr 1fr}
+.g3{grid-template-columns:1fr 1fr 1fr}
+@media(max-width:1100px){.g2,.g23,.g3{grid-template-columns:1fr}}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  margin-bottom:11px;overflow:hidden}
+.card>h3{margin:0;padding:10px 14px;font-size:12px;font-weight:600;
+  border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+.card>h3 small{margin-left:auto;font-weight:400;color:var(--ink-3);font-size:10.5px}
+.pad{padding:13px 14px}
+.sum{list-style:none;margin:0;padding:3px 0}
+.sum li{display:flex;align-items:baseline;gap:10px;padding:6px 14px;border-bottom:1px solid var(--line-2)}
+.sum li:last-child{border-bottom:0}
+.sum a{color:var(--accent-dk);text-decoration:none;border-bottom:1px solid var(--accent-lt);
+  font-size:12.5px;cursor:pointer}
+.sum a:hover{color:var(--black);border-bottom-color:var(--accent)}
+.sum .r{margin-left:auto;font-weight:600;font-size:13px}
+.sum .r em{font-style:normal;color:var(--ink-3);font-weight:400;font-size:11px;margin-left:6px}
+.tw{overflow:auto}
+/* Pursuits-only: a bounded, independently-scrolling table region so the
+   KPI cards and filter bar above it stay visible while scrolling rows.
+   Not applied to .tw generally -- Staffing and B&P's tables are shorter
+   and a fixed height would just clip them awkwardly. */
+.tw.pursuits-scroll{max-height:62vh;overflow-y:auto}
+.tw.pursuits-scroll thead th{position:sticky;top:0;z-index:3}
+/* Staffing month columns: 60 five-character headers ("26-01") need to be
+   tight or the table runs far wider than the card. */
+.staff-tbl th{font-size:9px;padding:6px 5px;white-space:nowrap}
+.staff-tbl td{font-size:11px;padding:5px 5px}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{position:sticky;top:0;background:#EDEDED;text-align:left;padding:7px 9px;font-size:9.5px;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2);font-weight:600;
+  border-bottom:1px solid var(--line);white-space:nowrap;user-select:none}
+th.s{cursor:pointer}th.s:hover{background:#E3E3E3}
+th.r,td.r{text-align:right}
+td{padding:6px 9px;border-bottom:1px solid var(--line-2);white-space:nowrap}
+tbody tr.click{cursor:pointer}
+tbody tr.click:hover{background:#FAFAFA}
+tbody tr.sel{background:var(--accent-tint)}
+tr.sub td{background:#FAFAFA;color:var(--ink-2);font-style:italic}
+tfoot td{padding:7px 9px;font-weight:600;border-top:2px solid var(--line);background:#F7F7F7}
+.pill{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600}
+.p-pre{background:#EDEDED;color:#555}
+.p-bh{background:var(--warn-bg);color:var(--warn)}
+.p-ptw{background:var(--accent-tint);color:var(--accent-dk)}
+.p-won{background:var(--accent-tint);color:var(--accent-dk)}
+.p-lost{background:#F7E9E7;color:var(--bad)}
+.p-can{background:#EDEDED;color:#888}
+.p-bid{background:var(--accent-tint);color:var(--accent-dk)}
+.p-nobid{background:#EDEDED;color:#777}
+.dep{color:var(--accent-dk);font-size:10.5px;font-weight:600}
+.pb{display:flex;align-items:center;gap:6px;justify-content:flex-end}
+.pb .t{width:40px;height:5px;background:#E8E8E8;border-radius:3px;overflow:hidden}
+.pb .f{height:100%;background:var(--accent)}
+.pb .f.lo{background:#9A8A2E}.pb .f.vlo{background:var(--bad)}
+svg{display:block;width:100%;overflow:visible;margin-left:2px}
+.ax{stroke:#D6D6D6;stroke-width:1}
+.axl{fill:var(--ink-3);font-size:9.5px;font-family:ui-monospace,monospace}
+.gl{stroke:var(--line-2);stroke-width:1}
+.lg{display:flex;flex-wrap:wrap;gap:4px 12px;padding:9px 14px 2px;font-size:10.5px;color:var(--ink-2)}
+.lg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.note{font-size:11px;color:var(--ink-3);padding:8px 14px 11px;line-height:1.5}
+.flag{border-left:3px solid var(--accent);background:var(--accent-tint);padding:9px 12px;
+  font-size:11.5px;color:var(--accent-dk);border-radius:0 var(--r) var(--r) 0;margin-bottom:11px}
+.inp{width:110px;text-align:right}
+.heat{display:inline-block;width:100%;text-align:right;padding:2px 4px;border-radius:2px}
+.qa{display:grid;grid-template-columns:1fr;gap:0}
+.qa .q{padding:9px 14px;border-bottom:1px solid var(--line-2)}
+.qa .q label{display:block;font-size:11px;color:var(--ink-3);margin-bottom:3px}
+.qa .q select{width:100%}
+.btn{background:var(--black);color:#fff;border:0;border-radius:var(--r);
+  padding:6px 13px;font:inherit;font-size:12px;cursor:pointer}
+.btn:hover{background:var(--accent-dk)}
+.btn.gh{background:#fff;color:var(--ink);border:1px solid var(--line)}
+.btn.gh:hover{background:#F0F0F0;color:var(--ink)}
+
+.dmk{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:3px;
+  font-size:10px;font-weight:600;max-width:190px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;vertical-align:-2px}
+.dep-child{background:#EAF3DE;color:#2C5209;border:1px solid #C5DCA8}
+.dep-parent{background:#0D0D0D;color:#C5DCA8}
+tr.dr-child td:first-child{box-shadow:inset 3px 0 0 #C5DCA8}
+tr.dr-parent td:first-child{box-shadow:inset 3px 0 0 #0D0D0D}
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;
+  border-bottom:1px solid var(--line);background:#FAFAFA}
+.filters label{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+.filters select,.filters input{font-size:12px}
+.sc{display:flex;gap:14px;padding:10px 14px;flex-wrap:wrap}
+.sc div{font-size:11px;color:var(--ink-3)}
+.sc b{display:block;font-size:15px;color:var(--ink);font-family:ui-monospace,monospace}
+.sc .chg{font-size:10.5px;font-weight:700}
+.up2{color:#3B6D11}.dn2{color:#8C2F27}
+
+.src{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;padding:14px}
+.srcc{border:1px solid var(--line);border-radius:var(--r);padding:12px 13px;background:#fff}
+.srcc h4{margin:0 0 3px;font-size:12.5px;font-weight:600}
+.srcc p{margin:0 0 9px;font-size:11px;color:var(--ink-3);line-height:1.45}
+.srcc .st{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;font-weight:700}
+.st-live{color:var(--accent)}.st-plan{color:var(--warn)}.st-file{color:var(--ink-3)}
+td.att{background:#FBECEA;color:#8C2F27;font-weight:600}
+td.att::after{content:" !";font-weight:700}
+.needs{background:#8C2F27;color:#fff;padding:1px 6px;border-radius:9px;
+  font-size:10px;font-weight:700;display:inline-block}
+.ok{color:var(--accent);font-weight:600}
+.stepbar{display:flex;gap:0;padding:0;border-bottom:1px solid var(--line)}
+.step{flex:1;padding:9px 12px;font-size:11px;border-right:1px solid var(--line);
+  color:var(--ink-3)}
+.step:last-child{border-right:0}
+.step b{display:block;font-size:12.5px;color:var(--ink);margin-bottom:2px}
+.step.on{background:var(--accent-tint)}
+.step.on b{color:var(--accent-dk)}
+
+/* Explicit dimensions and flex:none. This element sits inside .fr, whose
+   label rule is 180px wide -- a nested <label> must not inherit that. */
+.tg{display:inline-block;position:relative;width:26px;height:14px;flex:0 0 26px;
+  cursor:pointer;vertical-align:-2px}
+.tg input{opacity:0;width:0;height:0;position:absolute}
+.tg span{position:absolute;left:0;top:0;width:26px;height:14px;background:#C9C9C9;
+  border-radius:7px;transition:background .12s}
+.tg span::before{content:"";position:absolute;width:10px;height:10px;left:2px;top:2px;
+  background:#fff;border-radius:50%;transition:transform .12s}
+.tg input:checked + span{background:var(--accent)}
+.tg input:checked + span::before{transform:translateX(12px)}
+.tg input:focus-visible + span{outline:2px solid var(--accent-lt);outline-offset:1px}
+tr.nobid td:not(:first-child){opacity:.42}
+tr.nobid td b{text-decoration:line-through}
+
+.pager{display:flex;align-items:center;gap:6px;padding:10px 14px;border-top:1px solid var(--line);
+  background:#FAFAFA;font-size:11.5px;color:var(--ink-2);flex-wrap:wrap}
+.pager select{font-size:11.5px;padding:2px 5px}
+.pgbtns{margin-left:auto;display:flex;align-items:center;gap:5px}
+.pgbtns .btn{padding:3px 9px;font-size:11.5px}
+.pgbtns .btn[disabled]{opacity:.4;cursor:default}
+.pgnum{padding:0 8px;font-variant-numeric:tabular-nums}
+.dtbar{display:flex;align-items:center;gap:14px;background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--r);padding:10px 14px;margin-bottom:11px}
+.dtt b{font-size:14px}
+.dtt span{display:block;font-size:11px;color:var(--ink-3);margin-top:1px}
+.dtn{margin-left:auto;display:flex;gap:5px}
+.dtn .btn{padding:3px 10px}
+.fgrid{padding:2px 0}
+.fr{display:flex;align-items:baseline;gap:12px;padding:7px 14px;border-bottom:1px solid var(--line-2)}
+.fr:last-child{border-bottom:0}
+.fr > label{width:180px;flex:0 0 180px;font-size:11px;color:var(--ink-3)}
+.fv{flex:1;font-size:12.5px;display:flex;align-items:center}
+.pen{margin-left:auto;opacity:0;color:var(--ink-3);font-size:11px}
+.fr:hover .pen{opacity:1}
+.fr:hover{background:#FAFAFA}
+.fr.edit input,.fr.edit select{width:100%;max-width:280px;font-size:12.5px;padding:4px 7px}
+.fr.edit input[type=checkbox]{width:auto}
+.fr.dirty{background:var(--accent-tint)}
+.fr.dirty label{color:var(--accent-dk);font-weight:600}
+.fr.derived .fv{color:var(--ink-2)}
+.lockwhy{margin-left:auto;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink-3);border:1px solid var(--line);border-radius:9px;padding:1px 7px;cursor:help}
+.fnote{display:block;font-size:10.5px;color:var(--ink-3);margin-top:3px;line-height:1.4;
+  flex-basis:100%}
+.fnote.warn{color:#8C2F27;font-weight:600}
+.fr.edit .fv{flex-wrap:wrap}
+.adorn{position:relative;display:inline-flex;align-items:center;max-width:280px;width:100%}
+.adorn input{padding-left:22px !important}
+.adorn.pct input{padding-left:7px !important;padding-right:24px !important}
+.adorn::before{content:attr(data-sym);position:absolute;left:9px;color:var(--ink-3);
+  font-size:12px;pointer-events:none}
+.adorn.pct::before{left:auto;right:9px}
+.qhelp{margin-left:6px;width:15px;height:15px;line-height:14px;text-align:center;
+  border:1px solid var(--line);border-radius:50%;font-size:10px;color:var(--ink-3);
+  cursor:pointer;display:inline-block;background:#fff}
+.qhelp:hover{border-color:var(--accent);color:var(--accent-dk)}
+.helpbox{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:150;
+  display:flex;align-items:center;justify-content:center}
+.helpbox .inner{background:#fff;border-radius:6px;max-width:620px;width:90%;
+  max-height:80vh;overflow:auto;box-shadow:0 18px 50px rgba(0,0,0,.35)}
+.helpbox h4{margin:0;padding:14px 18px;border-bottom:1px solid var(--line);font-size:13.5px}
+.helpbox .body2{padding:14px 18px;font-size:12.5px;line-height:1.62;white-space:pre-wrap}
+.helpbox .ft{padding:11px 18px;border-top:1px solid var(--line);text-align:right}
+.qa.locked{opacity:.55}
+.qa.locked select{pointer-events:none}
+.editbar{display:flex;align-items:center;gap:10px;padding:9px 14px;
+  background:var(--accent-tint);border-bottom:1px solid var(--accent-lt);
+  font-size:12px;color:var(--accent-dk)}
+.editbar span{margin-left:auto;display:flex;gap:7px}
+.editbar .btn{padding:3px 12px;font-size:11.5px}
+
+/* login */
+#loginScreen{position:fixed;inset:0;background:var(--black);display:flex;
+  align-items:center;justify-content:center;z-index:100}
+.loginbox{background:var(--surface);border-radius:6px;padding:30px 32px;
+  width:340px;box-shadow:0 18px 50px rgba(0,0,0,.4)}
+.loginbox h1{margin:0;font-size:20px;letter-spacing:.24em;font-weight:600}
+.loginbox>span{display:block;margin-top:3px;font-size:9.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--accent);margin-bottom:22px}
+.loginbox label{display:block;font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink-3);margin-bottom:5px}
+.loginbox input{width:100%;padding:8px 10px;font-size:13px;margin-bottom:14px}
+.loginbox .btn{width:100%;padding:9px}
+.loginbox .err{color:var(--bad);font-size:11.5px;margin-top:10px;min-height:16px}
+.loginbox .hint{font-size:10.5px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+.side-ft span{display:block}
+.presence{display:none}
+.presence.show{display:block;background:#FBF4E2;border-left:3px solid var(--warn);
+  color:#6B5320;padding:9px 13px;font-size:11.5px;border-radius:0 var(--r) var(--r) 0;
+  margin-bottom:11px}
+.presence b{color:#4A3813}
+.dif{padding:2px 0;font-size:11.5px;white-space:normal}
+.dif b{display:inline-block;min-width:120px;color:var(--ink-2);font-weight:600}
+.dif .was{color:var(--ink-3);text-decoration:line-through}
+.dif .arr{color:var(--ink-3);margin:0 6px}
+.dif .now{color:var(--accent-dk);font-weight:600}
+#toast{position:fixed;left:50%;bottom:-60px;transform:translateX(-50%);
+  background:var(--black);color:#fff;padding:9px 18px;border-radius:4px;
+  font-size:12.5px;z-index:200;opacity:0;transition:bottom .18s,opacity .18s;
+  box-shadow:0 6px 20px rgba(0,0,0,.28);max-width:70vw}
+#toast.show{bottom:22px;opacity:1}
+#toast.bad{background:var(--bad)}
+.side-ft #signOut{margin-top:10px;padding:4px 12px;font-size:11.5px;
+  background:transparent;color:#BFBFBF;border-color:#2B2B2B}
+.side-ft #signOut:hover{background:#1C1C1C;color:#fff;border-color:#3B3B3B}
+</style></head><body><div class="app">
+<aside class="side">
+ <div class="brand"><h1>CDA</h1><span>Pipeline Decision Engine</span></div>
+ <nav class="nav" id="nav">
+   <div class="nav-lbl">Portfolio</div>
+   <a data-v="dash" class="on">Dashboard</a>
+   <a data-v="pursuits">Pursuits</a>
+   <a data-v="staffing">Staffing Capacity</a>
+   <div class="nav-lbl">Projections</div>
+   <a data-v="revenue">Revenue &amp; Profit</a>
+   <a data-v="bp">B&amp;P and Investment</a>
+   <div class="nav-lbl">Data</div>
+   <a data-v="import">Import</a>
+   <div class="nav-lbl">Planning</div>
+   <a data-v="sandbox">Scenario Sandbox</a>
+   <a data-v="targets">Targets &amp; Budgets</a>
+ </nav>
+ <div class="side-ft">Demo Business Unit<br><span id="pyLbl">Planning year 2026</span></div>
+</aside>
+<div class="main">
+ <header class="top">
+   <h2 id="title">Portfolio Dashboard</h2>
+   <div class="tools" id="tools"></div>
+ </header>
+ <div class="body">
+  <div id="dash" class="view on"></div>
+  <div id="pursuits" class="view"></div>
+  <div id="staffing" class="view"></div>
+  <div id="revenue" class="view"></div>
+  <div id="bp" class="view"></div>
+  <div id="sandbox" class="view"></div>
+  <div id="targets" class="view"></div>
+  <div id="import" class="view"></div>
+ </div></div></div>
+
+<script>
+/* Data now comes from the API rather than an embedded constant.
+   loadData() fills D before any view renders. The views are unchanged --
+   only the source moved. */
+let D = {pursuits: [], targets: [], staffing: {months: [], cats: [], demand: {}, total: []},
+         planning_year: new Date().getFullYear()};
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+/* Set innerHTML only if the target exists. A missing container is a bug
+   worth logging, not worth throwing over -- one view failing should not
+   take the whole page down with it. */
+function setHTML(sel, html){
+  const el = document.querySelector(sel);
+  if(!el){ console.warn('missing container', sel); return false; }
+  el.innerHTML = html; return true;
+}
+const money=v=>'$'+Math.round(v||0).toLocaleString('en-US');
+const M=v=>{const a=Math.abs(v||0);
+  if(a>=1e9)return '$'+(v/1e9).toFixed(2)+'B';
+  if(a>=1e6)return '$'+(v/1e6).toFixed(1)+'M';
+  if(a>=1e3)return '$'+(v/1e3).toFixed(0)+'K';return '$'+Math.round(v||0);};
+const pctS=v=>v==null?'\u2014':(v*100).toFixed(1)+'%';
+// Pwin only: whole percent, no decimals, everywhere Pwin is shown.
+const pwinPct=v=>v==null?'\u2014':Math.round(v*100)+'%';
+let PY=D.planning_year;
+let YRS=[0,1,2,3,4].map(i=>PY+i);
+const sum=(a,f)=>a.reduce((s,x)=>s+(f(x)||0),0);
+let P=D.pursuits;
+
+/* ---------- scoring ----------
+   DELIBERATELY ABSENT. Scoring tables, base score, per-answer deltas and price
+   position are engine-side IP and must never be shipped to the browser.
+   The client sends answers; the engine returns Pwin only. -------------------- */
+/* dependency graph */
+/* Dependency graph.
+   The workbook's 'Dependent UID' column holds the internal UID, which the
+   user never sees -- it differs from Opportunity ID on most rows. Everything
+   DISPLAYED here resolves to the Opportunity ID and name instead. */
+const BY_UID={}, DEPS_OF={}, DEPENDENTS={};
+const isDependent=u=>DEPS_OF[u]!=null, isDependedOn=u=>!!DEPENDENTS[u];
+const oppRef=u=>{const t=BY_UID[u];return t?`${t.opp_id??'?'}`:String(u??'?');};
+const oppName=u=>{const t=BY_UID[u];return t?t.name:(DEP_NAME[u]||'unknown pursuit');};
+const DEP_NAME={};
+const depMark=u=>{
+  if(isDependent(u)){const d=DEPS_OF[u];
+    return `<span class="dmk dep-child" title="Depends on ${oppName(d)} (ID ${oppRef(d)})">&#8627; ${oppName(d)}</span>`;}
+  if(isDependedOn(u)){const k=DEPENDENTS[u];
+    return `<span class="dmk dep-parent" title="${k.map(v=>oppName(v)+' (ID '+oppRef(v)+')').join(', ')}">&#8623; ${k.map(oppName).join(', ')}</span>`;}
+  return '';};
+const depRow=u=>isDependent(u)?' dr-child':isDependedOn(u)?' dr-parent':'';
+
+/* Live bid/no-bid state. Toggling is a WHAT-IF on the working pipeline:
+   a no-bid stops consuming B&P and stops contributing revenue immediately.
+   Nothing is persisted -- this is a prototype. */
+const BID={};
+const isBid=u=>!!BID[u];   // keys are opportunity ids, as strings
+let OPEN=P.filter(x=>!x.outcome);
+let DECIDED=P.filter(x=>x.outcome);
+/* editable targets */
+const TG={};
+
+// The ONE accessor for a pursuit's year-N figures. The API pads years to
+// 5 dense entries, but that is a contract worth verifying, not one worth
+// crashing the whole dashboard over if it is ever violated by a row the
+// migration or a future edge case did not anticipate.
+const yearOf=(x,i)=>(x.years && x.years[i]) ? x.years[i] : {rev:0,fee:0,bp:0,inv:0};
+const yearAgg=(list,i)=>({
+  rev:sum(list,x=>yearOf(x,i).rev), fee:sum(list,x=>yearOf(x,i).fee),
+  bp:sum(list,x=>yearOf(x,i).bp),   inv:sum(list,x=>yearOf(x,i).inv)});
+/* INCLUSION RULE (all years, not just the current one):
+   count everything you are pursuing or have pursued, because the question is
+   whether you are meeting the plan. Exclude only:
+     - CANCELLED  -- the solicitation went away, the revenue was never real
+     - NO-BID     -- you decided not to chase it
+   Won pursuits are secured revenue. Lost pursuits carry no revenue anyway,
+   so including them is harmless and keeps the rule simple to explain. */
+const counted=x=>x.outcome!=='Canceled' && isBid(x.uid);
+const listFor=()=>P.filter(counted);
+const byYear=()=>YRS.map((y,i)=>({y,...yearAgg(listFor(),i)}));
+
+/* ---------- charts ---------- */
+function barsGrouped(series,labels,colors,{h=190,fmt=M,pad=36,w=760}={}){
+  const n=labels.length, gw=(w-pad-8)/n, bw=Math.min(24,(gw-16)/series.length);
+  const max=Math.max(...series.flatMap(s=>s.v),1);
+  const y=v=>h-15-(v/max)*(h-36);
+  let g='';
+  for(let i=0;i<=4;i++){const gy=h-15-(i/4)*(h-36);
+    g+=`<line class="gl" x1="${pad}" x2="${w}" y1="${gy}" y2="${gy}"/><text class="axl" x="4" y="${gy+3}">${fmt(max*i/4)}</text>`;}
+  labels.forEach((l,i)=>{const x0=pad+6+i*gw;
+    series.forEach((s,j)=>{
+      const bx=x0+(gw-bw*series.length-4*(series.length-1))/2+j*(bw+4), vy=y(s.v[i]);
+      g+=`<rect x="${bx}" y="${vy}" width="${bw}" height="${Math.max(0,h-15-vy)}" fill="${colors[j]}" rx="1"><title>${s.name} ${l}: ${fmt(s.v[i])}</title></rect>`;});
+    g+=`<text class="axl" x="${x0+gw/2}" y="${h-2}" text-anchor="middle">${l}</text>`;});
+  g+=`<line class="ax" x1="${pad}" x2="${w}" y1="${h-15}" y2="${h-15}"/>`;
+  return `<svg viewBox="0 0 ${w} ${h}">${g}</svg>`;
+}
+const legend=(n,c)=>'<div class="lg">'+n.map((x,i)=>`<span><i style="background:${c[i]}"></i>${x}</span>`).join('')+'</div>';
+const CCOL=['#0D0D0D','#22350E','#3B6D11','#4E8A1B','#639F2C','#7CB343','#96C463','#AFD289',
+ '#C5DCA8','#555555','#6E6E6E','#888888','#A0A0A0','#B8B8B8','#8A6A17','#A6862F','#C2A455','#D8C58A'];
+function stackedArea(months,cats,demand,{h=250}={}){
+  const w=880,pad=40,n=months.length;
+  const totals=months.map((_,i)=>cats.reduce((s,c)=>s+demand[c][i],0));
+  const max=Math.max(...totals,1);
+  const X=i=>pad+(i/(n-1))*(w-pad-4), Y=v=>h-20-(v/max)*(h-34);
+  let acc=months.map(()=>0),g='';
+  for(let i=0;i<=4;i++){const gy=h-20-(i/4)*(h-34);
+    g+=`<line class="gl" x1="${pad}" x2="${w}" y1="${gy}" y2="${gy}"/><text class="axl" x="4" y="${gy+3}">${(max*i/4).toFixed(0)}</text>`;}
+  cats.forEach((c,ci)=>{const top=acc.map((a,i)=>a+demand[c][i]);
+    const up=top.map((v,i)=>`${X(i)},${Y(v)}`).join(' ');
+    const dn=acc.map((v,i)=>`${X(i)},${Y(v)}`).reverse().join(' ');
+    g+=`<polygon points="${up} ${dn}" fill="${CCOL[ci%CCOL.length]}" opacity=".95"><title>${c}</title></polygon>`;acc=top;});
+  months.forEach((m,i)=>{if(i%3)return;g+=`<text class="axl" x="${X(i)}" y="${h-6}" text-anchor="middle">${m}</text>`;});
+  const pk=totals.indexOf(Math.max(...totals));
+  g+=`<line x1="${X(pk)}" x2="${X(pk)}" y1="12" y2="${h-20}" stroke="#8C2F27" stroke-width="1" stroke-dasharray="3 3"/>
+      <text class="axl" x="${X(pk)+5}" y="20" fill="#8C2F27">peak ${totals[pk].toFixed(0)} FTE \u00b7 ${months[pk]}</text>`;
+  g+=`<line class="ax" x1="${pad}" x2="${w}" y1="${h-20}" y2="${h-20}"/>`;
+  return `<svg viewBox="0 0 ${w} ${h}">${g}</svg>`;
+}
+function histogram(vals,{h=190,bins=10}={}){
+  // Room at top for the y-axis title, bottom for the x-axis title.
+  const w=420,pad=30,top=10,bot=32;const c=new Array(bins).fill(0);
+  vals.forEach(v=>c[Math.min(bins-1,Math.floor(v*bins))]++);
+  const max=Math.max(...c,1),bw=(w-pad-6)/bins;let g='';
+  const plotH=h-top-bot;
+  c.forEach((v,i)=>{const bh=(v/max)*plotH,x=pad+i*bw;
+    g+=`<rect x="${x+2}" y="${top+plotH-bh}" width="${bw-4}" height="${bh}" fill="#3B6D11" rx="1"><title>${i*10}\u2013${(i+1)*10}% Pwin: ${v} pursuit${v===1?'':'s'}</title></rect>`;
+    if(i%2===0)g+=`<text class="axl" x="${x+bw/2}" y="${h-18}" text-anchor="middle">${i*10}%</text>`;});
+  for(let i=0;i<=3;i++){const gy=top+plotH-(i/3)*plotH;
+    g+=`<line class="gl" x1="${pad}" x2="${w}" y1="${gy}" y2="${gy}"/><text class="axl" x="4" y="${gy+3}">${Math.round(max*i/3)}</text>`;}
+  g+=`<line class="ax" x1="${pad}" x2="${w}" y1="${top+plotH}" y2="${top+plotH}"/>`;
+  // Axis titles.
+  g+=`<text class="axl" x="${pad+(w-pad)/2}" y="${h-4}" text-anchor="middle" style="font-weight:600">Pwin</text>`;
+  // Pivot the rotation ON the text's own point (translate x,y then rotate),
+  // not around the SVG origin -- that is what put the label between the
+  // axis numbers instead of along the left edge.
+  const ptY = top+plotH/2;
+  g+=`<text class="axl" x="0" y="0" text-anchor="middle" transform="translate(12,${ptY}) rotate(-90)" style="font-weight:600">Pursuits</text>`;
+  return `<svg viewBox="0 0 ${w} ${h}">${g}</svg>`;
+}
+/* THE single source of truth for what Pwin to show. Sole source is 95%
+   by definition (the residual is the customer not awarding at all) --
+   this must be applied everywhere a Pwin is displayed, not just in the
+   detail view, or the table and the detail page disagree on the same
+   pursuit, as they did before this fix. */
+function effectivePwin(r){ return r.sole ? 0.95 : r.pwin; }
+function pctInt(v){ return v==null ? null : Math.round(v*100); }
+
+function pwinCell(v){if(v==null)return '<span style="color:#888">\u2014</span>';
+  const cls=v<0.2?'vlo':v<0.4?'lo':'';
+  return `<span class="pb"><span class="t"><span class="f ${cls}" style="width:${(v*100).toFixed(0)}%"></span></span><b class="num">${Math.round(v*100)}%</b></span>`;}
+const stagePill=s=>{const m={'Pre-BH':'p-pre','Post-BH':'p-bh','Post-PTW':'p-ptw'};
+  return `<span class="pill ${m[s]||'p-pre'}">${s||'\u2014'}</span>`;};
+const bidPill=b=>`<span class="pill ${b==='Bid'?'p-bid':'p-nobid'}">${b||'\u2014'}</span>`;
+const outPill=o=>o?`<span class="pill ${o==='Won'?'p-won':o==='Lost'?'p-lost':'p-can'}">${o}</span>`:'<span class="pill p-pre">Open</span>';
+
+/* ---------- year selector ---------- */
+let selYear=PY;
+let staffWinStart = null;   // start year of the 5-year staffing window.
+// null means "not yet chosen" -- vStaffing() defaults it to the current
+// planning year the first time it renders. Setting it eagerly here would
+// freeze it at whatever PY happened to be at script-parse time, before the
+// real payload (and the real planning year) had loaded.
+
+function tools(v){
+  if(v==='staffing'){
+    const s=D.staffing;
+    const yrs=[...new Set((s.months||[]).map(m=>+m.slice(0,4)))];
+    const lo=yrs.length?Math.min(...yrs):PY, hi=yrs.length?Math.max(...yrs):PY;
+    // Any 5-year window whose start still leaves at least one real year of
+    // data visible -- lets the user page back to history or forward to
+    // whatever is in the pipeline, without landing on an all-empty window.
+    const opts=[]; for(let y=lo;y<=hi;y++) opts.push(y);
+    $('#tools').innerHTML=`<span style="font-size:11px;color:#888">5-year window from</span>
+      <select id="stSel">${opts.map(y=>`<option ${y===staffWinStart?'selected':''}>${y}</option>`).join('')}</select>
+      <span class="chip on">Demo Business</span><span class="chip">Demo BU</span>`;
+    $('#stSel').onchange=e=>{staffWinStart=+e.target.value;vStaffing();};
+    return;
+  }
+  if(v==='dash'||v==='revenue'||v==='bp'||v==='pursuits'){
+    $('#tools').innerHTML=`<span style="font-size:11px;color:#888">Year</span>
+      <select id="ySel">${YRS.map(y=>`<option ${y===selYear?'selected':''}>${y}</option>`).join('')}</select>
+      ${v==='dash'?'<span class="chip" id="cfgBtn">&#9881; Configure</span>':''}
+      <span class="chip on">Demo Business</span><span class="chip">Demo BU</span>`;
+    $('#ySel').onchange=e=>{selYear=+e.target.value;render();};
+    const cb=$('#cfgBtn'); if(cb) cb.onclick=()=>{cfgOpen=!cfgOpen;vDash();};
+  } else $('#tools').innerHTML=`<span class="chip on">Demo Business</span><span class="chip">Demo BU</span>`;
+}
+
+
+/* ---------- Dashboard configure ----------
+   Card visibility works. Chart-type switching works where a table equivalent
+   exists. Pie is present to talk to, and refuses politely -- a pie of five
+   years is a worse bar chart, and saying so is more useful than drawing it. */
+const DASH_CFG={
+  revenue:{on:true,type:'bar',label:'Revenue vs. target'},
+  summary:{on:true,type:'list',label:'Portfolio summary'},
+  outcomes:{on:true,type:'table',label:'Outcomes by year'},
+  pwindist:{on:true,type:'hist',label:'Pwin distribution'},
+  bp:{on:true,type:'bar',label:'B&P required vs. budget'},
+  invchart:{on:true,type:'bar',label:'Investment vs. budget'},
+  invtable:{on:true,type:'table',label:'Investment by year'},
+  market:{on:true,type:'table',label:'By market'},
+  phase:{on:true,type:'table',label:'By competitive analysis phase'},
+};
+let cfgOpen=false;
+function cfgPanel(){
+  if(!cfgOpen) return '';
+  const typeOpts=k=>{
+    const t=DASH_CFG[k].type;
+    const avail={bar:['bar','table','pie'],table:['table','bar','pie'],
+                 hist:['hist','table'],list:['list']}[t==='pie'?'bar':t]||['bar'];
+    return `<select data-cfgt="${k}">${avail.map(o=>
+      `<option value="${o}" ${o===t?'selected':''}>${
+        {bar:'Bar chart',table:'Table',pie:'Pie chart',hist:'Histogram',list:'Summary list'}[o]
+      }</option>`).join('')}</select>`;};
+  return `<div class="card" style="border-color:var(--accent)">
+   <h3>Configure dashboard <small>per user &middot; saved to their profile</small></h3>
+   <div class="tw"><table><thead><tr><th style="width:34px"></th><th>Card</th>
+     <th style="width:150px">Shown as</th><th>Notes</th></tr></thead>
+   <tbody>${Object.keys(DASH_CFG).map(k=>`<tr>
+     <td class="r"><label class="tg"><input type="checkbox" data-cfg="${k}"
+       ${DASH_CFG[k].on?'checked':''}><span></span></label></td>
+     <td><b>${DASH_CFG[k].label}</b></td>
+     <td>${typeOpts(k)}</td>
+     <td style="font-size:11px;color:var(--ink-3)">${
+       k==='summary'?'Metric rows are clickable through to a filtered pursuit list'
+       :k==='pwindist'?'Band widths configurable in the built version'
+       :'Drag to reorder \u2014 not wired in this prototype'}</td></tr>`).join('')}
+   </tbody></table></div>
+   <div class="note"><b>What is real here:</b> show/hide and bar\u2194table switching work.
+     Reordering, pie charts and per-widget filters are not wired \u2014 this panel exists to
+     agree the shape of the feature. In the built version this is a per-user preference
+     row, not a product setting: the metrics themselves and how they are computed stay
+     fixed, because letting a client redefine "probabilistic revenue" would undermine
+     the accuracy claim.</div>
+   <div class="pad" style="border-top:1px solid var(--line);display:flex;gap:8px">
+     <button class="btn" id="cfgDone">Done</button>
+     <button class="btn gh" id="cfgReset">Reset to default</button></div></div>`;
+}
+/* Generic table renderer used when a chart is switched to table view. */
+function seriesTable(series,labels,fmt){
+  return `<div class="tw"><table><thead><tr><th>Year</th>
+    ${series.map(s=>`<th class="r">${s.name}</th>`).join('')}
+    <th class="r">Variance</th></tr></thead><tbody>
+    ${labels.map((l,i)=>{const d=(series[1]?series[1].v[i]:0)-(series[0]?series[0].v[i]:0);
+      return `<tr><td class="num">${l}</td>${series.map(s=>
+        `<td class="r num">${fmt(s.v[i])}</td>`).join('')}
+        <td class="r num" style="color:${d>=0?'#3B6D11':'#8C2F27'}">${d>=0?'+':''}${fmt(d)}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+function chartOrTable(key,series,labels,colors,names){
+  const t=DASH_CFG[key].type;
+  if(t==='table') return seriesTable(series,labels,M);
+  if(t==='pie') return `<div class="note" style="padding:22px 15px">A pie chart cannot show
+    five years against a target \u2014 there is no whole for the parts to sum to. Left as a bar
+    chart. Pie is available where a single year is split by market or by phase.</div>
+    ${barsGrouped(series,labels,colors)}${legend(names,colors)}`;
+  return barsGrouped(series,labels,colors)+legend(names,colors);
+}
+
+/* ---------- Dashboard ---------- */
+function vDash(){
+  const i=YRS.indexOf(selYear), a=yearAgg(listFor(),i), t=TG[selYear];
+  const gap=a.rev-(t.rev_target||0), bpv=(t.bp_budget||0)-a.bp, ivv=(t.inv_budget||0)-a.inv;
+  const cls=v=>v>=0?'up':'dn', sgn=v=>(v>=0?'+':'')+M(v);
+  const grp=(key,list)=>{const m={};list.forEach(x=>{const k=x[key]||'\u2014';
+    (m[k]=m[k]||{n:0,value:0,prob:0,pw:[]});m[k].n++;m[k].value+=x.value;m[k].prob+=x.prob;
+    if(x.pwin!=null)m[k].pw.push(x.pwin);});
+    return Object.entries(m).map(([k,v])=>({k,...v,pwin:v.pw.length?v.pw.reduce((p,q)=>p+q)/v.pw.length:null})).sort((x,y)=>y.value-x.value);};
+  const oy={}; DECIDED.forEach(x=>{const y=x.outcome_year||'\u2014';(oy[y]=oy[y]||{Won:0,Lost:0,Canceled:0,wv:0,lv:0});oy[y][x.outcome]++;
+    if(x.outcome==='Won')oy[y].wv+=x.value; if(x.outcome==='Lost')oy[y].lv+=x.value;});
+  const oyk=Object.keys(oy).sort();
+  const W=DECIDED.filter(x=>x.outcome==='Won').length, L=DECIDED.filter(x=>x.outcome==='Lost').length;
+  const wrC=W+L?W/(W+L):null;
+  const wv=sum(DECIDED.filter(x=>x.outcome==='Won'),x=>x.value), lv=sum(DECIDED.filter(x=>x.outcome==='Lost'),x=>x.value);
+  const wrV=wv+lv?wv/(wv+lv):null;
+  const bid=P.filter(x=>x.bid==='Bid').length, nobid=P.filter(x=>x.bid==='No Bid').length;
+  const revS=[{name:'Target',v:YRS.map(y=>TG[y].rev_target||0)},{name:'Probabilistic',v:byYear().map(r=>r.rev)}];
+  const bpS=[{name:'Budget',v:YRS.map(y=>TG[y].bp_budget||0)},{name:'Required',v:byYear().map(r=>r.bp)}];
+  const C=DASH_CFG, SHOW=(k,html)=>C[k].on?html:'';
+  $('#dash').innerHTML=cfgPanel()+`
+  <div class="kpis">
+    <div class="kpi hl"><div class="k">${selYear} probabilistic revenue</div><div class="v num">${M(a.rev)}</div>
+      <div class="s ${cls(gap)}">${sgn(gap)} vs ${M(t.rev_target||0)} target</div></div>
+    <div class="kpi hl"><div class="k">${selYear} probabilistic fee</div><div class="v num">${M(a.fee)}</div>
+      <div class="s ${cls(a.fee-(t.fee_target||0))}">${sgn(a.fee-(t.fee_target||0))} vs target</div></div>
+    <div class="kpi"><div class="k">${selYear} B&amp;P required</div><div class="v num">${M(a.bp)}</div>
+      <div class="s ${cls(bpv)}">${sgn(bpv)} vs ${M(t.bp_budget||0)} budget</div></div>
+    <div class="kpi"><div class="k">${selYear} investment</div><div class="v num">${M(a.inv)}</div>
+      <div class="s ${cls(ivv)}">${sgn(ivv)} vs ${M(t.inv_budget||0)} budget</div></div>
+    <div class="kpi"><div class="k">Open pipeline</div><div class="v num">${M(sum(OPEN.filter(x=>isBid(x.uid)),x=>x.value))}</div>
+      <div class="s">${OPEN.filter(x=>isBid(x.uid)).length} open &middot; ${DECIDED.filter(x=>x.outcome!=='Canceled').length} closed counted</div></div>
+  </div>
+  <div class="grid g23">
+   ${SHOW('revenue',`<div class="card"><h3>Revenue \u2014 probabilistic vs. target <small>bid pursuits, cancelled excluded</small></h3>
+     ${chartOrTable('revenue',revS,YRS,['#B8B8B8','#3B6D11'],['Revenue target','Probabilistic revenue'])}
+     <div class="note">${selYear} probabilistic revenue is ${M(a.rev)} against a ${M(t.rev_target||0)} target \u2014 ${gap>=0?'ahead by':'short by'} ${M(Math.abs(gap))}.</div></div>`)}
+   ${SHOW('summary',`<div class="card"><h3>Portfolio summary</h3>
+     <ul class="sum">
+      <li><a onclick="goToPursuits({outcome:'OPEN'})">Open pursuits</a><span class="r num">${OPEN.length}<em>${M(sum(OPEN,x=>x.value))}</em></span></li>
+      <li><a onclick="goToPursuits({bid:'Bid'})">Bid decisions</a><span class="r num">${bid} bid / ${nobid} no-bid${
+        (P.length-bid-nobid)>0 ? `<em>${P.length-bid-nobid} undecided</em>` : ''}</span></li>
+      <li><a onclick="goToPursuits({sole:true})">Sole source</a><span class="r num">${P.filter(x=>x.sole).length}<em>${M(sum(P.filter(x=>x.sole),x=>x.value))}</em></span></li>
+      <li><a onclick="goToPursuits({dep:true})">Dependent pursuits</a><span class="r num">${P.filter(x=>x.dep).length}<em>linked</em></span></li>
+      <li><a onclick="goToPursuits({pwin:'hi'})">Pwin at or above 50%</a><span class="r num">${OPEN.filter(x=>x.pwin>=.5).length}<em>${M(sum(OPEN.filter(x=>x.pwin>=.5),x=>x.value))}</em></span></li>
+      <li><a onclick="goToPursuits({pwin:'lo'})">Pwin below 20%</a><span class="r num">${OPEN.filter(x=>x.pwin<.2).length}<em>${M(sum(OPEN.filter(x=>x.pwin<.2),x=>x.value))}</em></span></li>
+      <li><a onclick="show('staffing')">Peak staffing demand</a><span class="r num">${Math.max(...D.staffing.total).toFixed(0)}<em>FTE</em></span></li>
+     </ul></div>`)}
+  </div>
+  <div class="grid g23">
+   ${SHOW('outcomes',`<div class="card"><h3>Outcomes by year <small>decided pursuits</small></h3>
+    <div class="tw"><table><thead><tr><th>Year</th><th class="r">Won</th><th class="r">Lost</th>
+     <th class="r">Canceled</th><th class="r">Win rate (count)</th><th class="r">Won value</th><th class="r">Win rate (value)</th></tr></thead>
+    <tbody>${oyk.map(y=>{const o=oy[y],d=o.Won+o.Lost;
+      return `<tr><td class="num">${y}</td><td class="r num">${o.Won}</td><td class="r num">${o.Lost}</td>
+      <td class="r num">${o.Canceled}</td><td class="r num">${d?(o.Won/d*100).toFixed(0)+'%':'\u2014'}</td>
+      <td class="r num">${money(o.wv)}</td><td class="r num">${o.wv+o.lv?(o.wv/(o.wv+o.lv)*100).toFixed(0)+'%':'\u2014'}</td></tr>`;}).join('')}
+    </tbody><tfoot><tr><td>All</td><td class="r num">${W}</td><td class="r num">${L}</td>
+      <td class="r num">${DECIDED.filter(x=>x.outcome==='Canceled').length}</td>
+      <td class="r num">${wrC==null?'\u2014':(wrC*100).toFixed(1)+'%'}</td>
+      <td class="r num">${money(wv)}</td><td class="r num">${wrV==null?'\u2014':(wrV*100).toFixed(1)+'%'}</td></tr></tfoot></table></div>
+    <div class="note">Cancellations are excluded from win rate \u2014 a cancelled solicitation is not a loss.
+      Outcome year uses the phase-completion or cancel date where recorded, otherwise the planned award date.</div></div>`)}
+   ${SHOW('pwindist',`<div class="card"><h3>Pwin distribution <small>${OPEN.length} open pursuits</small></h3>
+    ${histogram(OPEN.filter(x=>x.pwin!=null).map(x=>x.pwin))}
+    <div class="note">Horizontal axis is Pwin %.</div></div>`)}
+  </div>
+  <div class="grid g2">
+   ${SHOW('bp',`<div class="card"><h3>B&amp;P required vs. budget</h3>
+     ${chartOrTable('bp',bpS,YRS,['#B8B8B8','#8A6A17'],['Budget','Required'])}
+     <div class="note">${selYear} requires ${M(a.bp)} against ${M(t.bp_budget||0)} budgeted \u2014 ${bpv>=0?'within budget':'<b>over by '+M(-bpv)+'</b>'}.</div></div>`)}
+   ${SHOW('invchart',`<div class="card"><h3>Investment \u2014 planned vs. budget</h3>
+     ${chartOrTable('invchart',[{name:'Budget',v:YRS.map(y=>TG[y].inv_budget||0)},{name:'Planned',v:byYear().map(r=>r.inv)}],YRS,['#B8B8B8','#3B6D11'],['Investment budget','Planned investment'])}</div>`)}
+  </div>
+  <div class="grid g2">
+   ${SHOW('invtable',`<div class="card"><h3>Investment by year</h3>
+    <div class="tw"><table><thead><tr><th>Year</th><th class="r">Budget</th><th class="r">Planned</th>
+      <th class="r">Variance</th><th class="r">Pursuits</th></tr></thead>
+    <tbody>${YRS.map((y,i)=>{const g=yearAgg(OPEN,i),t2=TG[y],v=(t2.inv_budget||0)-g.inv;
+      const n=listFor().filter(x=>yearOf(x,i).inv>0).length;
+      return `<tr${y===selYear?' class="sel"':''}><td class="num">${y}</td><td class="r num">${money(t2.inv_budget||0)}</td>
+      <td class="r num">${money(g.inv)}</td><td class="r num" style="color:${v>=0?'#3B6D11':'#8C2F27'}">${v>=0?'+':''}${money(v)}</td>
+      <td class="r num">${n}</td></tr>`;}).join('')}
+    </tbody><tfoot><tr><td>Total</td><td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0))}</td>
+      <td class="r num">${money(sum(byYear(),r=>r.inv))}</td>
+      <td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0)-sum(byYear(),r=>r.inv))}</td><td></td></tr></tfoot></table></div></div>`)}
+  </div>
+  <div class="grid g2">
+   ${SHOW('market',`<div class="card"><h3>By market</h3>
+    <div class="tw"><table><thead><tr><th>Market</th><th class="r">Pursuits</th><th class="r">Value</th>
+      <th class="r">Probabilistic</th><th class="r">Avg Pwin</th></tr></thead>
+    <tbody>${grp('market',OPEN).map(r=>`<tr><td>${r.k}</td><td class="r num">${r.n}</td>
+      <td class="r num">${M(r.value)}</td><td class="r num">${M(r.prob)}</td>
+      <td class="r num">${r.pwin==null?'\u2014':(r.pwin*100).toFixed(1)+'%'}</td></tr>`).join('')}</tbody></table></div></div>
+   <div class="card"><h3>By competitive analysis phase</h3>
+    <div class="tw"><table><thead><tr><th>Phase</th><th class="r">Pursuits</th><th class="r">Value</th>
+      <th class="r">Probabilistic</th><th class="r">Avg Pwin</th></tr></thead>
+    <tbody>${grp('stage',OPEN).map(r=>`<tr><td>${stagePill(r.k)}</td><td class="r num">${r.n}</td>
+      <td class="r num">${M(r.value)}</td><td class="r num">${M(r.prob)}</td>
+      <td class="r num">${r.pwin==null?'\u2014':(r.pwin*100).toFixed(1)+'%'}</td></tr>`).join('')}</tbody></table></div>
+    <div class="note">Pwin precision improves once Black Hat and PTW are complete.</div></div>`)}
+  </div>`;
+  $$('#dash [data-cfg]').forEach(c=>c.onchange=e=>{DASH_CFG[e.target.dataset.cfg].on=e.target.checked;vDash();});
+  $$('#dash [data-cfgt]').forEach(s=>s.onchange=e=>{DASH_CFG[e.target.dataset.cfgt].type=e.target.value;vDash();});
+  const cd=$('#cfgDone'); if(cd) cd.onclick=()=>{cfgOpen=false;vDash();};
+  const cr=$('#cfgReset'); if(cr) cr.onclick=()=>{Object.keys(DASH_CFG).forEach(k=>DASH_CFG[k].on=true);vDash();};
+}
+
+/* ---------- Pursuits ---------- */
+let sortKey='value',sortDir=-1,selUid=null;
+let pageSize=50, page=1, detailMode=false;
+let FLT={market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:'',sole:''};
+// Navigate from the dashboard summary to Pursuits, pre-filtered.
+// Resets every other filter first: arriving with a stale filter from an
+// earlier visit would silently hide pursuits the click implied should
+// be visible.
+window.goToPursuits = function(f){
+  FLT = {market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:'',sole:''};
+  Object.assign(FLT, f);
+  if(FLT.sole===true) FLT.sole='1';   // dropdown value is the string '1'
+  dashFilterNote = Object.keys(f).length ? summarizeFilter(f) : '';
+  page = 1;
+  // show() only toggles which pre-rendered view is VISIBLE -- it does not
+  // regenerate content. Without re-running vPursuits() first, the filter
+  // change is set in state but never reaches the DOM.
+  vPursuits();
+  show('pursuits');
+};
+function summarizeFilter(f){
+  const parts=[];
+  if(f.outcome==='OPEN') parts.push('open pursuits');
+  if(f.bid==='Bid') parts.push('marked Bid');
+  if(f.sole) parts.push('sole source');
+  if(f.dep) parts.push('with a dependency');
+  if(f.pwin==='hi') parts.push('Pwin \u2265 50%');
+  if(f.pwin==='lo') parts.push('Pwin < 20%');
+  return parts.join(', ');
+}
+let dashFilterNote = '';
+
+function applyFilters(list){
+  return list.filter(x=>
+    (!FLT.market||x.market===FLT.market)&&
+    (!FLT.stage||x.stage===FLT.stage)&&
+    (!FLT.bid||x.bid===FLT.bid)&&
+    (!FLT.outcome||(FLT.outcome==='Open'?!x.outcome:x.outcome===FLT.outcome))&&
+    (!FLT.dep||(FLT.dep==='child'?isDependent(x.uid):FLT.dep==='parent'?isDependedOn(x.uid)
+        :FLT.dep==='any'?(isDependent(x.uid)||isDependedOn(x.uid))
+        :!isDependent(x.uid)&&!isDependedOn(x.uid)))&&
+    (!FLT.pwin||(FLT.pwin==='hi'?x.pwin>=.5:FLT.pwin==='mid'?(x.pwin>=.2&&x.pwin<.5):x.pwin<.2))&&
+    (!FLT.sole||!!x.sole)&&
+    (!FLT.dueYear||(x.due||'').slice(0,4)===FLT.dueYear)&&
+    (!FLT.q||(x.name||'').toLowerCase().includes(FLT.q.toLowerCase())||String(x.opp_id||'').includes(FLT.q)));
+}
+const uniq=(k)=>[...new Set(P.map(x=>x[k]).filter(Boolean))].sort();
+function vPursuits(){
+  const cols=[['bid','Bid','r'],['name','Opportunity name',''],['opp_id','ID','r'],
+    ['market','Market',''],['contract','Contract',''],['stage','Phase',''],
+    ['value','Award value','r'],['fee','Fee %','r'],['pwin','Pwin','r'],
+    ['prob','Probabilistic','r'],['bp','B&P req','r'],['bp_start','B&P start',''],
+    ['due','Proposal due',''],['award','Award',''],['outcome','Outcome','']];
+  if(detailMode&&selUid!=null){ detailView(selUid); return; }
+  const dueYears=[...new Set(P.map(x=>(x.due||'').slice(0,4)).filter(Boolean))].sort();
+  const filt=applyFilters(P);
+  const sorted=[...filt].sort((a,b)=>{const x=a[sortKey],y=b[sortKey];
+    if(x==null)return 1;if(y==null)return -1;return (x>y?1:x<y?-1:0)*sortDir;});
+  const pages=Math.max(1,Math.ceil(sorted.length/pageSize));
+  if(page>pages)page=pages;
+  const from=(page-1)*pageSize, rows=sorted.slice(from,from+pageSize);
+  const fo=filt.filter(x=>!x.outcome);
+  const fob=fo.filter(x=>isBid(x.uid));
+  const sel=(id,lbl,opts,val)=>`<label>${lbl}</label><select data-f="${id}">
+    <option value="">All</option>${opts.map(o=>`<option value="${o[0]}" ${val===o[0]?'selected':''}>${o[1]}</option>`).join('')}</select>`;
+  const i0=YRS.indexOf(selYear), t=TG[selYear];
+  const ag=yearAgg(listFor(),i0);
+  const bpVar=(t.bp_budget||0)-ag.bp, revVar=ag.rev-(t.rev_target||0);
+  const invVar=(t.inv_budget||0)-ag.inv;
+  const bar=(used,cap,over)=>{
+    const pct=cap?Math.min(100,used/cap*100):0, o=used>cap;
+    return `<div style="height:5px;background:#E8E8E8;border-radius:3px;margin-top:7px;overflow:hidden">
+      <div style="height:100%;width:${pct}%;background:${o?'#8C2F27':'#3B6D11'}"></div></div>
+      <div style="font-size:10.5px;margin-top:4px;color:${o?'#8C2F27':'#3B6D11'};font-weight:600">
+      ${o?`over by ${M(used-cap)}`:`${M(cap-used)} remaining`}</div>`;};
+  const bidN=P.filter(x=>!x.outcome&&isBid(x.uid)).length;
+  const nobidN=P.filter(x=>!x.outcome&&!isBid(x.uid)).length;
+  $('#pursuits').innerHTML=`
+  <div class="kpis">
+    <div class="kpi hl"><div class="k">${selYear} B&amp;P required</div>
+      <div class="v num">${M(ag.bp)}</div>
+      <div class="s">of ${M(t.bp_budget||0)} budgeted</div>${bar(ag.bp,t.bp_budget||0)}</div>
+    <div class="kpi hl"><div class="k">${selYear} probabilistic revenue</div>
+      <div class="v num">${M(ag.rev)}</div>
+      <div class="s">against ${M(t.rev_target||0)} target</div>
+      <div style="height:5px;background:#E8E8E8;border-radius:3px;margin-top:7px;overflow:hidden">
+        <div style="height:100%;width:${Math.min(100,(t.rev_target?ag.rev/t.rev_target*100:0))}%;
+          background:${revVar>=0?'#3B6D11':'#8A6A17'}"></div></div>
+      <div style="font-size:10.5px;margin-top:4px;font-weight:600;
+        color:${revVar>=0?'#3B6D11':'#8A6A17'}">${revVar>=0?`+${M(revVar)} over target`:`${M(-revVar)} short`}</div></div>
+    <div class="kpi"><div class="k">${selYear} investment</div>
+      <div class="v num">${M(ag.inv)}</div>
+      <div class="s">of ${M(t.inv_budget||0)} budgeted</div>${bar(ag.inv,t.inv_budget||0)}</div>
+    <div class="kpi"><div class="k">Bid decisions</div>
+      <div class="v num">${bidN} <span style="font-size:14px;color:#888">/ ${nobidN}</span></div>
+      <div class="s">bid / no-bid &middot; open pursuits</div>
+      <div style="font-size:10.5px;margin-top:9px"><button class="btn gh" id="bidAll"
+        style="padding:2px 8px;font-size:11px">All bid</button></div></div>
+    <div class="kpi"><div class="k">Open award value</div>
+      <div class="v num">${M(sum(P.filter(x=>!x.outcome&&isBid(x.uid)),x=>x.value))}</div>
+      <div class="s">bid pursuits only</div></div>
+  </div>
+  <div class="flag">Toggle <b>Bid</b> on any row \u2014 B&amp;P, revenue and investment
+    against ${selYear} budget recompute immediately, and <b>the change is saved</b>.
+    (The Scenario Sandbox is the place to try changes without saving them.)</div>
+  ${dashFilterNote ? `<div class="flag">Showing <b>${dashFilterNote}</b> \u2014 filtered from the dashboard.
+    <button class="btn gh" style="padding:2px 9px;font-size:11px;margin-left:8px" onclick="dashFilterNote='';FLT={market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:'',sole:''};vPursuits();">Clear filter</button></div>` : ''}
+  <div class="card"><h3>Pursuits <small>click a column to sort \u00b7 click a row to open</small></h3>
+   <div class="filters">
+     <input type="text" id="fq" placeholder="Search name or ID" value="${FLT.q}" style="width:170px">
+     ${sel('market','Market',uniq('market').map(m=>[m,m]),FLT.market)}
+     ${sel('stage','Phase',uniq('stage').map(m=>[m,m]),FLT.stage)}
+     ${sel('bid','Bid',[['Bid','Bid'],['No Bid','No Bid']],FLT.bid)}
+     ${sel('outcome','Status',[['Open','Open'],['Won','Won'],['Lost','Lost'],['Canceled','Canceled']],FLT.outcome)}
+     ${sel('dep','Dependency',[['any','Any dependency'],['child','Depends on another'],['parent','Has dependents'],['none','Independent']],FLT.dep)}
+     ${sel('sole','Sole source',[['1','Sole source only']],FLT.sole)}
+     ${sel('pwin','Pwin band',[['hi','50% and above'],['mid','20\u201350%'],['lo','Below 20%']],FLT.pwin)}
+     ${sel('dueYear','Proposal due',dueYears.map(y=>[y,y]),FLT.dueYear)}
+     <button class="btn gh" id="fClear">Clear</button>
+     <span style="margin-left:auto;font-size:11px;color:var(--ink-3)">${filt.length} of ${P.length}</span>
+   </div>
+  <div class="tw pursuits-scroll"><table><thead><tr>${cols.map(c=>`<th class="s ${c[2]}" data-k="${c[0]}">${c[1]}${sortKey===c[0]?(sortDir>0?' \u25b2':' \u25bc'):''}</th>`).join('')}</tr></thead>
+  <tbody>${rows.map(r=>`<tr class="click${r.uid===selUid?' sel':''}${depRow(r.uid)}${!r.outcome&&!isBid(r.uid)?' nobid':''}" data-uid="${r.uid}">
+    <td class="r">${r.outcome?'<span style="color:#888">\u2014</span>'
+      :`<label class="tg"><input type="checkbox" class="bidT" data-u="${r.uid}" ${isBid(r.uid)?'checked':''}><span></span></label>`}</td>
+    <td><b>${r.name}</b>${depMark(r.uid)}${r.sole?' <span class="pill p-ptw">SS</span>':''}</td>
+    <td class="r num">${r.opp_id??'\u2014'}</td><td>${r.market||'\u2014'}</td><td>${r.contract||'\u2014'}</td>
+    <td>${stagePill(r.stage)}</td>
+    <td class="r num">${money(r.value)}</td><td class="r num">${(r.fee*100).toFixed(1)}%</td>
+    <td class="r">${pwinCell(effectivePwin(r))}</td><td class="r num">${money(r.prob)}</td>
+    <td class="r num">${money(r.bp)}</td><td class="num">${r.bp_start||'\u2014'}</td>
+    <td class="num">${r.due||'\u2014'}</td><td class="num">${r.award||'\u2014'}</td><td>${outPill(r.outcome)}</td></tr>`).join('')}
+  </tbody><tfoot><tr><td></td><td>Totals \u00b7 filtered, bid only</td><td colspan="4"></td>
+    <td class="r num">${money(sum(fob,x=>x.value))}</td><td></td><td></td>
+    <td class="r num">${money(sum(fob,x=>x.prob))}</td><td class="r num">${money(sum(fob,x=>x.bp))}</td>
+    <td colspan="4"></td></tr></tfoot></table></div>
+   <div class="pager">
+     <span>Showing <b>${sorted.length?from+1:0}\u2013${Math.min(from+pageSize,sorted.length)}</b>
+       of <b>${sorted.length}</b></span>
+     <span style="margin-left:14px">Rows
+       <select id="pgSize">${[25,50,100,200].map(n=>
+         `<option ${n===pageSize?'selected':''}>${n}</option>`).join('')}</select></span>
+     <span class="pgbtns">
+       <button class="btn gh" id="pgFirst" ${page===1?'disabled':''}>&laquo;</button>
+       <button class="btn gh" id="pgPrev" ${page===1?'disabled':''}>Prev</button>
+       <span class="pgnum">Page ${page} of ${pages}</span>
+       <button class="btn gh" id="pgNext" ${page===pages?'disabled':''}>Next</button>
+       <button class="btn gh" id="pgLast" ${page===pages?'disabled':''}>&raquo;</button>
+     </span></div></div>`;
+  $$('#pursuits th').forEach(th=>th.onclick=()=>{const k=th.dataset.k;
+    if(sortKey===k)sortDir*=-1;else{sortKey=k;sortDir=-1;} vPursuits();});
+  $$('.bidT').forEach(c=>c.onchange=e=>{
+    e.stopPropagation();
+    // dataset values are strings; BID is keyed by opportunity id as given.
+    saveBid(e.target.dataset.u, e.target.checked);
+  });
+  $$('#pursuits .tg').forEach(l=>l.onclick=e=>e.stopPropagation());
+  const ba=$('#bidAll'); if(ba) ba.onclick=async ()=>{
+    const changing = P.filter(x=>!x.outcome && !isBid(x.uid));
+    if(!changing.length){ toast('Everything open is already Bid.'); return; }
+    if(!confirm(`Set ${changing.length} pursuit(s) to Bid? This is saved.`)) return;
+    ba.disabled = true;
+    let ok=0;
+    for(const x of changing){ if(await saveBid(x.uid, true)) ok++; }
+    ba.disabled = false;
+    toast(ok===changing.length ? `${ok} set to Bid.`
+                               : `${ok} of ${changing.length} saved.`,
+          ok!==changing.length);
+  };
+  $$('#pursuits tbody tr').forEach(tr=>tr.onclick=e=>{
+    // Anything inside the bid toggle, or any control, must not open detail.
+    if(e.target.closest('.tg')) return;
+    if(['INPUT','SELECT','BUTTON','LABEL','OPTION'].includes(e.target.tagName)) return;
+    // uid is the opportunity id, a STRING. Do not coerce -- +"1146" === 1146
+    // never matches x.uid === "1146", and the detail view silently fails.
+    selUid=tr.dataset.uid;detailMode=true;vPursuits();});
+  $$('.filters [data-f]').forEach(s=>s.onchange=e=>{FLT[e.target.dataset.f]=e.target.value;vPursuits();});
+  $('#fq').oninput=e=>{FLT.q=e.target.value;const p=e.target.selectionStart;vPursuits();
+    const n=$('#fq');n.focus();n.setSelectionRange(p,p);};
+  $('#fClear').onclick=()=>{FLT={market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:'',sole:''};dashFilterNote='';vPursuits();};
+  const ps=$('#pgSize'); if(ps) ps.onchange=e=>{pageSize=+e.target.value;page=1;vPursuits();};
+  const go=(p)=>{page=p;vPursuits();window.scrollTo(0,0);};
+  const b=(id,fn)=>{const el=$(id); if(el&&!el.disabled) el.onclick=fn;};
+  b('#pgFirst',()=>go(1)); b('#pgPrev',()=>go(Math.max(1,page-1)));
+  b('#pgNext',()=>go(Math.min(pages,page+1))); b('#pgLast',()=>go(pages));
+}
+
+/* Question prompts \u2014 verbatim from PwinForm control captions.
+   TM1a/TM1b vary by opportunity type (IsDevOrExistingProduct). */
+const QSEC={'TM 1a':'Technical & Management','TM 1b':'Technical & Management',
+ 'TM 2':'Technical & Management','TM 3':'Technical & Management','TM 4':'Technical & Management',
+ 'TM 5':'Technical & Management','PP 1':'Past Performance','P 1':'Price','P 2':'Price'};
+const QTXT={
+ 'TM 1a':{PRODUCT:'1a.  Does our product perform better than our competitor?',
+          SERVICES:'1a.  Have we done a job like this before?'},
+ 'TM 1b':{PRODUCT:'1b.  Is our Technical Solution more mature than competitors?',
+          SERVICES:'1b.  Have our competitors done a job like this before?'},
+ 'TM 2':'2.  Is there an incumbent?',
+ 'TM 3':'3.  Is the incumbent well-performing?',
+ 'TM 4':'4.  Will we need a teammate in order to bid key aspects of the job?',
+ 'TM 5':'5.  Do we plan to invest (other than B&P) to increase competitiveness prior to RFP release?',
+ 'PP 1':'1.  Do we have any performance issues on similar contracts within the last 3 years?',
+ 'P 1':'1.  How far above/below a normal bid are we planning for this proposal?',
+ 'P 2':'2.  Is this Best Value or LPTA?'};
+const isProd=t=>{t=(t||'').toLowerCase();return t.includes('product')||t.includes('dev');};
+function qPrompt(k,type){const v=QTXT[k];
+  return typeof v==='string'?v:(isProd(type)?v.PRODUCT:v.SERVICES);}
+
+
+/* Shared questionnaire renderer.
+   Enforces every PwinForm gate:
+     - P2 = LPTA disables TM1a / TM1b
+     - SERVICES only: TM1a = "No" removes TM1b "not as many building blocks as us"
+     - SERVICES only: neither TM1a nor TM1b a "yes" => TM2 can only be "No"
+     - ALL types: TM2 determines the TM3 option list exactly
+   Source: PwinForm.frm UpdateTM1bOptions_ / UpdateTM2Options_ / CB_TM2_Change */
+const TM3_BY_TM2={
+ 'Yes, us':['We are performing satisfactorily/unknown','We have performance issues'],
+ 'Yes, one of the competitors':['Incumbent competitor is performing satisfactorily/unknown',
+                                'Incumbent competitor has performance issues'],
+ 'No':['N/A']};
+function optionsFor(k,ans,type){
+  const prod=isProd(type), svc=!prod;
+  let list=(QOPT[k]||[]).filter(o=>{
+    if(k==='TM 1a'||k==='TM 1b'){
+      const P=['Same','Better','Worse','Same Level','More Mature','Less Mature'];
+      return prod ? P.includes(o) : !P.includes(o);
+    }
+    return true;});
+  if(svc && k==='TM 1b' && ans['TM 1a']==='No')
+    list=list.filter(o=>o!=='Yes, but not as many building blocks as us');
+  if(svc && k==='TM 2'){
+    const yA=ans['TM 1a']&&ans['TM 1a']!=='No', yB=ans['TM 1b']&&ans['TM 1b']!=='No';
+    if(!yA&&!yB) list=['No'];
+  }
+  if(k==='TM 3') list=TM3_BY_TM2[ans['TM 2']]||['N/A'];
+  return list;
+}
+/* Re-apply gates after any change, exactly as the form cascades. */
+function cascade(ans,type){
+  ['TM 1b','TM 2','TM 3'].forEach(k=>{
+    const opts=optionsFor(k,ans,type);
+    if(!opts.includes(ans[k])) ans[k]=opts[0];});
+  return ans;
+}
+function renderQ(ans,baseAns,type,editable){
+  const lpta = ans['P 2']==='LPTA';
+  // Under LPTA the lowest technically acceptable price wins, so technical
+  // merit, management and past performance stop discriminating. Only the
+  // price posture and any investment still move the number.
+  const LPTA_OFF = ['TM 1a','TM 1b','TM 2','TM 3','TM 4','PP 1'];
+  let out='',sec='';
+  Object.keys(QOPT).forEach(k=>{
+    if(QSEC[k]!==sec){sec=QSEC[k];
+      const secOff = lpta && (sec==='Technical & Management' || sec==='Past Performance');
+      out+=`<div style="padding:8px 14px;background:#0D0D0D;color:#C5DCA8;font-size:9.5px;
+        letter-spacing:.14em;text-transform:uppercase;font-weight:600">${sec}${
+        secOff?' <span style="color:#8A8A8A;text-transform:none;letter-spacing:0"> \u2014 not scored under LPTA</span>':''}</div>`;}
+    const dis = lpta && LPTA_OFF.includes(k);
+    const changed = ans[k]!==baseAns[k];
+    const opts=optionsFor(k,ans,type);
+    const locked = opts.length===1 && (k==='TM 2'||k==='TM 3');
+    let why='';
+    if(dis) why=' &middot; not scored under LPTA';
+    else if(k==='TM 2'&&locked) why=' &middot; forced: no prior experience in 1a or 1b';
+    else if(k==='TM 3'&&locked) why=' &middot; forced by TM2';
+    else if(k==='TM 3') why=' &middot; options set by TM2';
+    else if(k==='TM 1b'&&!isProd(type)&&ans['TM 1a']==='No')
+      why=' &middot; one option removed (TM1a = No)';
+    out+=`<div class="q" style="${changed?'background:#EAF3DE;':''}${dis||locked?'opacity:.55;':''}">
+      <label>${qPrompt(k,type)}${changed?' &middot; changed':''}${why}
+        <span class="qhelp" onclick="showHelp('${k}','${(type||'').replace(/'/g,'')}')"
+              title="What does this question mean?">?</span></label>
+      <select data-a="${k}" ${dis||locked||!editable?'disabled':''}>
+        ${opts.map(o=>`<option ${o===ans[k]?'selected':''}>${o}</option>`).join('')}
+      </select></div>`;});
+  return out;
+}
+const QOPT={
+ 'TM 1a':['Same','Better','Worse','On contract today','Yes, but not as many building blocks as competitor','No, but our teammates are on contract today','No'],
+ 'TM 1b':['Same Level','More Mature','Less Mature','On contract today','Yes, but not as many building blocks as us','No'],
+ 'TM 2':['Yes, us','Yes, one of the competitors','No'],
+ 'TM 3':['We are performing satisfactorily/unknown','We have performance issues','N/A','Incumbent competitor is performing satisfactorily/unknown','Incumbent competitor has performance issues'],
+ 'TM 4':['Yes, we will outsource most of the actual work requested ("noble work")','Yes, we will outsource some of the actual work requested ("noble work")','No'],
+ 'TM 5':['No','Low','Moderate','High'],
+ 'PP 1':['Yes','No'],
+ 'P 1':['3% above normal','2% above normal','1% above normal','Normal Bid','1% lower than normal','2% lower than normal','3% lower than normal','4% lower than normal'],
+ 'P 2':['Best Value','LPTA']};
+function detailView(uid){
+  const r=P.find(x=>x.uid===uid);
+  if(!r){                      // filtered out, or an id that no longer exists
+    detailMode=false; selUid=null; vPursuits();
+    toast('That pursuit is no longer available.', true);
+    return;
+  }
+  const idx=[...P].findIndex(x=>x.uid===uid);
+  const s5=r.years.reduce((a,y)=>({rev:a.rev+y.rev,fee:a.fee+y.fee,bp:a.bp+y.bp,inv:a.inv+y.inv}),
+    {rev:0,fee:0,bp:0,inv:0});
+  const prior=(r.award_y!=null&&r.award_y<PY), later=(r.end_y!=null&&r.end_y>PY+4);
+  const outside=Math.max(0,(r.prob||0)-s5.rev);
+  const priorAmt=prior?outside*(later?0.5:1):0, laterAmt=later?outside-priorAmt:0;
+  const closed = !!r.outcome;
+  if(editUid !== uid){ editBuf = {}; editUid = uid; }
+  const fld=(lbl,val,edit=true)=>`<div class="fr"><label>${lbl}</label>
+    <div class="fv">${val}${edit?'<span class="pen">&#9998;</span>':''}</div></div>`;
+  $('#pursuits').innerHTML=`
+  <div class="dtbar">
+    <button class="btn gh" id="dBack">&larr; Back to pursuits</button>
+    <div class="dtt"><b>${r.name}</b> ${depMark(r.uid)}
+      <span>ID ${r.opp_id??'\u2014'} &middot; ${r.market||'\u2014'} &middot; ${(r.type||'').slice(0,44)}</span>
+      <span>${r.updated_by_email
+        ? `Last edited by <b style="color:var(--ink-2)">${r.updated_by_name||r.updated_by_email}</b> ${ago(r.updated_at)}`
+        : 'No edits recorded since import'}</span></div>
+    <div class="dtn">
+      <button class="btn gh" id="dPrev">&uarr;</button>
+      <button class="btn gh" id="dNext">&darr;</button>
+    </div>
+  </div>
+  <div id="presence" class="presence"></div>
+  <div class="grid g2">
+   <div class="card"><h3>Opportunity
+      <small>${closed ? 'closed \u2014 read only' : 'edit any field, then Save'}</small></h3>
+    <div id="editBarSlot"></div>
+    <div class="fgrid">
+      ${fieldRow(r,'name','Opportunity name')}
+      ${isAdmin()
+        ? fieldRow(r,'opp_id','Opportunity ID',{note:'Used to match records on CRM import. Changing it creates a duplicate on the next sync.', warnNote:true})
+        : `<div class="fr derived"><label>Opportunity ID</label><div class="fv">
+             <span class="num">${r.opp_id??'\u2014'}</span>
+             <span class="lockwhy" title="This is the key CRM import matches on. Only an administrator can change it.">admin only</span>
+           </div></div>`}
+      ${fieldRow(r,'market','Market',{type:'select',options:(REF?REF.markets:[]).map(m=>({code:m.code,label:`${m.code} \u2014 ${m.name}`}))})}
+      ${fieldRow({...r, type:(REF?(REF.opportunity_types.find(o=>o.label===r.type)||{}).code:null)},'type','Opportunity type',{type:'select',options:(REF?REF.opportunity_types:[]),note:'Changing this swaps the TM1a/TM1b question set \u2014 existing answers may need revisiting'})}
+      ${fieldRow({...r, contract:(REF?(REF.contract_types.find(o=>o.label===r.contract)||{}).code:null)},'contract','Contract type',{type:'select',options:(REF?REF.contract_types:[]),note:'Sets the nominal fee rate'})}
+      ${fieldRow(r,'sole','Sole source',{type:'bool',note:'Sole source means one bidder and a Pwin of 95% \u2014 the residual is the customer not awarding at all. The assessment below does not apply.'})}
+      ${fieldRow(r,'value','Award value',{type:'number',step:'100000',min:0,sym:'$'})}
+      ${fieldRow(r,'fee','Planned fee',{fmt:v=>v==null?'\u2014':(v*100).toFixed(2)+'%'})}
+      ${fieldRow(r,'inv','Investment',{fmt:v=>
+         `${money(v||0)}${r.invpct?` <span style="color:var(--ink-3)">(${(r.invpct*100).toFixed(1)}% of award value)</span>`:''}`})}
+      ${fieldRow({...r, stage:(REF?(REF.pipeline_stages.find(o=>o.label===r.stage)||{}).code:null)},'stage','Competitive analysis phase',{type:'select',options:(REF?REF.pipeline_stages:[]),note:'Moving past Pre-BH opens the Black Hat or PTW form \u2014 not yet built in this version'})}
+      ${fieldRow(r,'bp_start','B&P start',{fmt:v=>v||'\u2014'})}
+      ${fieldRow(r,'due','Proposal due',{type:'date'})}
+      ${fieldRow(r,'award','Contract award',{type:'date'})}
+      ${fieldRow(r,'end','Contract end date',{type:'date'})}
+      <div class="fr"><label>Bid decision</label><div class="fv">
+        <label class="tg"><input type="checkbox" id="dBid"
+          ${isBid(r.uid)?'checked':''} ${closed?'disabled':''}><span></span></label>
+        <span style="margin-left:8px">${closed?'closed':(isBid(r.uid)?'Bid':'No bid')}</span></div></div>
+      <div class="fr ${closed?'derived':'edit'}"><label>Outcome</label><div class="fv">
+        <select id="dOutcome" style="max-width:280px"><option value="">Open</option>
+          ${(REF?REF.outcomes:[]).map(o=>
+            `<option value="${o.code}" ${r.outcome&&r.outcome.toUpperCase()===o.code?'selected':''}>${o.label}</option>`).join('')}
+        </select>${closed?'<span class="fnote" style="margin-left:10px">A closed pursuit cannot be edited. Set this back to Open to make changes.</span>':''}</div></div>
+      ${r.dep?fieldRow({v:`<b>${oppName(r.dep)}</b> (ID ${oppRef(r.dep)})`},'v','Depends on'):''}
+      ${DEPENDENTS[r.uid]?`<div class="fr derived"><label>Depended on by</label>
+        <div class="fv">${DEPENDENTS[r.uid].map(v=>`${oppName(v)} (ID ${oppRef(v)})`).join(', ')}</div></div>`:''}
+    </div>
+   </div>
+
+   <div class="card"><h3>Pwin assessment
+     <small>questionnaire v1 &middot; engine v0.23</small></h3>
+    ${r.stage && r.stage !== 'Pre-BH' && !r.sole ? bhptwCard(uid, r) : ''}
+    <div class="sc" style="border-bottom:1px solid var(--line);background:#FAFAFA">
+      <div>Pwin<b>${pwinPct(effectivePwin(r))}</b></div>
+      ${r.dep?`<div>Base Pwin<b>${pwinPct(r.base_pwin)}</b></div>`:''}
+      <div>Expected bidders<b>${r.sole?'1':(r.bidders??'\u2014')}</b></div>
+      <div>Probabilistic revenue<b>${M(r.prob)}</b></div>
+    </div>
+    ${r.dep?`<div class="note" style="background:#EAF3DE;color:#2C5209;padding:9px 14px">
+      Dependent pursuit. Two assessments are required \u2014 one assuming
+      <b>${oppName(r.dep)}</b> is lost, one assuming it is won. Both must be
+      answered before this pursuit can be saved.
+      <div style="margin-top:7px"><button class="btn gh" style="padding:2px 9px;font-size:11px">Base (no lift)</button>
+      <button class="btn gh" style="padding:2px 9px;font-size:11px">If ${oppName(r.dep)} is won</button></div></div>`:''}
+    ${r.sole
+      ? `<div class="note" style="background:var(--accent-tint);color:var(--accent-dk);padding:11px 14px">
+           <b>Sole source \u2014 no competitive assessment.</b> With one bidder the
+           Pwin is 95%; the residual is the customer choosing not to award at
+           all, not a competitor winning. The questionnaire below is retained
+           for history but does not drive this pursuit's Pwin.</div>
+         <div class="qa locked">${renderQ(r.answers,r.answers,r.type,false)}</div>`
+      : `<div class="qa">${renderQ(r.answers,r.answers,r.type,!closed)}</div>`}
+    ${r.sole ? '' : `<div class="fr edit" style="border-top:1px solid var(--line)">
+       <label>Expected bidders
+         <span class="qhelp" onclick="showHelp('Bidders','')" title="What does this mean?">?</span></label>
+       <div class="fv"><input data-ed="bidders" type="number" min="1" max="6"
+         value="${Object.prototype.hasOwnProperty.call(editBuf,'bidders')?editBuf.bidders:(r.bidders??'')}"
+         ${closed?'disabled':''} style="max-width:100px"></div></div>`}
+    <div class="pad" style="border-top:1px solid var(--line);display:flex;gap:8px;align-items:center">
+      <button class="btn" id="dCalc" ${closed||r.sole||(r.stage&&r.stage!=='Pre-BH')?'disabled':''}>Recalculate Pwin</button>
+      <span style="font-size:11px;color:#888;margin-left:auto">${
+        r.sole ? 'Sole source uses the 95% business rule, not the engine'
+        : (r.stage&&r.stage!=='Pre-BH') ? 'Past Pre-BH \u2014 use the Black Hat or PTW form above'
+        : 'Sends tech/mgmt/pp/price/fee \u2014 the tournament solve stays server-side'}</span></div>
+   </div>
+  </div>
+
+  <div class="card"><h3>Year phasing <small>probabilistic</small></h3>
+   <div class="tw"><table><thead><tr><th>Year</th><th class="r">Revenue</th><th class="r">Fee</th>
+     <th class="r">B&amp;P</th><th class="r">Investment</th></tr></thead>
+   <tbody>
+     ${priorAmt>0?`<tr class="sub"><td>Previous years</td><td class="r num">${money(priorAmt)}</td>
+       <td class="r num">\u2014</td><td class="r num">\u2014</td><td class="r num">\u2014</td></tr>`:''}
+     ${r.years.map((y,i)=>`<tr><td class="num">${YRS[i]}</td><td class="r num">${money(y.rev)}</td>
+       <td class="r num">${money(y.fee)}</td><td class="r num">${money(y.bp)}</td>
+       <td class="r num">${money(y.inv)}</td></tr>`).join('')}
+     ${laterAmt>0?`<tr class="sub"><td>Later years</td><td class="r num">${money(laterAmt)}</td>
+       <td class="r num">\u2014</td><td class="r num">\u2014</td><td class="r num">\u2014</td></tr>`:''}
+   </tbody><tfoot><tr><td>Total</td><td class="r num">${money(s5.rev+priorAmt+laterAmt)}</td>
+     <td class="r num">${money(s5.fee)}</td><td class="r num">${money(s5.bp)}</td>
+     <td class="r num">${money(s5.inv)}</td></tr></tfoot></table></div>
+   <div class="note">Period of performance ${r.award_y||'\u2014'}\u2013${r.end_y||'\u2014'}.
+     ${(priorAmt||laterAmt)?'Amounts outside the five-year planning window are derived from probabilistic award less the sum of the in-window years.':'Entire period of performance falls inside the planning window.'}</div></div>
+  <div class="card"><h3>Change history
+     <small>every write is recorded by the database, not by the application</small></h3>
+   <div id="histBody"></div></div>`;
+  presenceStart(r.id);
+  loadHistory(r.id);
+  if(!REF) loadReference().then(()=>detailView(uid)).catch(e=>toast(e.message,true));
+  if(r.stage && r.stage !== 'Pre-BH' && !r.sole) wireBhPtwCard(uid, r);
+
+  const back=()=>{
+    if(Object.keys(editBuf).length &&
+       !confirm('You have unsaved changes. Leave and discard them?')) return;
+    editBuf={}; editUid=null; presenceStop();
+    detailMode=false; vPursuits(); window.scrollTo(0,0);};
+  $('#dBack').onclick=back;
+
+  /* DO NOT re-render the whole view on change. Clicking Save blurs the
+     input, which fires change, which would rebuild the DOM and destroy the
+     button before the click lands -- so the first save of a text field
+     silently did nothing. Update the buffer and the edit bar only. */
+  // The ONLY thing that creates or updates the edit bar. Rebinds its
+  // handlers every call rather than assuming a previous binding survived --
+  // that assumption is what broke this before.
+  const refreshEditBar = ()=>{
+    const slot = $('#editBarSlot');
+    const n = Object.keys(editBuf).length;
+    if(!slot) return;
+    slot.innerHTML = n ? editBar() : '';
+    if(n){
+      $('#edSave').onclick = ()=>saveEdits(uid);
+      $('#edCancel').onclick = ()=>{editBuf={};detailView(uid);};
+    }
+  };
+  refreshEditBar();   // reflect editBuf immediately on every (re)draw
+
+  $$('#pursuits [data-ed]').forEach(el=>{
+    el.disabled = closed;
+    el.onchange = e=>{
+      const key = e.target.dataset.ed;
+      let v = e.target.type==='checkbox' ? e.target.checked : e.target.value;
+      if(e.target.type==='number') v = v===''?null:+v;
+      if(v==='') v = null;
+      const apiKey = UI_TO_API[key];
+      if(!apiKey) return;
+      if(key==='sole' && v===true) editBuf.bidders = 1;
+      editBuf[apiKey] = v;
+      e.target.closest('.fr').classList.add('dirty');
+      refreshEditBar();
+      // Sole source changes what the assessment means, so that one does
+      // warrant a redraw -- but only that one.
+      if(key==='sole') detailView(uid);
+    };});
+  const es=$('#edSave'); if(es) es.onclick=()=>saveEdits(uid);
+  const ec=$('#edCancel'); if(ec) ec.onclick=()=>{editBuf={};detailView(uid);};
+
+  const oc=$('#dOutcome');
+  if(oc) oc.onchange=async e=>{
+    const v=e.target.value;
+    if(v && !confirm(`Record this pursuit as ${v.toLowerCase()}? `
+       + `A closed pursuit cannot be edited afterwards.`)){
+      detailView(uid); return; }
+    if(!v && !confirm('Reopen this pursuit?')){ detailView(uid); return; }
+    await setOutcome(uid, v || null, false);
+  };
+  const db=$('#dBid'); if(db) db.onchange=async e=>{
+    await saveBid(uid, e.target.checked);
+    detailView(uid);};
+  $('#dCalc').onclick=()=>recalculatePwin(uid);
+  const step=d=>{const list=[...P]; const i=list.findIndex(x=>x.uid===uid);
+    const n=list[(i+d+list.length)%list.length];
+    presenceStop(); selUid=n.uid; detailView(n.uid); window.scrollTo(0,0);};
+  $('#dPrev').onclick=()=>step(-1); $('#dNext').onclick=()=>step(1);
+}
+/* openQ removed. The questionnaire now lives inside the pursuit detail
+   view; #qform no longer exists, so this could only ever throw. */
+
+/* ---------- Recalculate Pwin (Pre-BH questionnaire path only) ----------
+   NEVER used by Black Hat/PTW -- that path is analyst-entered and never
+   calls the engine. See api/app/recalc.py. */
+async function recalculatePwin(uid){
+  const r = P.find(x=>x.uid===uid);
+  if(!r) return;
+  const btn = document.getElementById('dCalc');
+  if(btn){ btn.disabled = true; btn.textContent = 'Recalculating\u2026'; }
+  try{
+    const res = await fetch(`/api/pursuits/${r.id}/recalculate`, {
+      method:'POST', credentials:'same-origin'});
+    if(res.status===401){ showLogin(); return; }
+    const body = await res.json().catch(()=>({}));
+    if(!res.ok){
+      const msg = typeof body.detail==='string' ? body.detail
+                : (body.detail && body.detail[0] && body.detail[0].msg)
+                  || `recalculation failed (${res.status})`;
+      toast(msg, true);
+      return;
+    }
+    await loadData();
+    detailView(uid);
+    toast(`Recalculated: Pwin ${pwinPct(body.pwin)}.`);
+  }catch(e){ toast(`Could not reach the Pwin engine: ${e.message}`, true); }
+}
+
+/* ---------- Black Hat / PTW ----------
+   Neither path calls the engine -- by this phase a real competitive
+   analysis has already happened outside this system. Black Hat computes
+   fee server-side (get_fee(contract) + P1 delta); PTW overrides fee
+   directly with an analyst-entered margin. See ddl/13_bhptw_fee.sql. */
+let bhptwUid = null;             // which pursuit the cache below belongs to
+let BHPTW = null;                // /api/pursuits/{id}/bhptw response, cached
+let bhptwMode = null;            // 'BLACK_HAT' | 'PTW' -- which form shows
+let bhptwStep = 'BASE';          // 'BASE' | 'DEPENDENT_WON'
+let bhptwBuf = {BASE:{}, DEPENDENT_WON:{}};   // in-progress field values
+
+async function loadBhPtw(uid, r){
+  try{
+    const res = await fetch(`/api/pursuits/${r.id}/bhptw`, {credentials:'same-origin'});
+    if(res.status===401){ showLogin(); return; }
+    if(!res.ok) throw new Error(`bhptw fetch failed (${res.status})`);
+    BHPTW = await res.json();
+    if(uid===selUid && detailMode) detailView(uid);
+  }catch(e){ toast(e.message, true); }
+}
+
+function pctInput(id, v0to1, opts){
+  opts = opts || {};
+  const shown = v0to1==null ? '' : +(v0to1*100).toFixed(4);
+  return `<span class="adorn pct" data-sym="%"><input id="${id}" type="number"
+    step="0.1" min="0" ${opts.max!=null?`max="${opts.max}"`:''}
+    value="${shown}" ${opts.disabled?'disabled':''}></span>`;
+}
+function moneyInput(id, v, opts){
+  opts = opts || {};
+  return `<span class="adorn" data-sym="$"><input id="${id}" type="number"
+    step="1000" min="0" value="${v==null?'':v}" ${opts.disabled?'disabled':''}></span>`;
+}
+function bhRow(label, inputHtml, note){
+  return `<div class="fr edit"><label>${label}</label>
+    <div class="fv">${inputHtml}${note?`<span class="fnote">${note}</span>`:''}</div></div>`;
+}
+
+function bhptwCard(uid, r){
+  if(bhptwUid !== uid){
+    bhptwUid = uid; BHPTW = null; bhptwMode = null; bhptwStep = 'BASE';
+    bhptwBuf = {BASE:{}, DEPENDENT_WON:{}};
+  }
+  if(!BHPTW){
+    return `<div class="card" id="bhptwCard"><h3>${r.stage} assessment</h3>
+      <div class="pad">Loading\u2026</div></div>`;
+  }
+  if(!BHPTW.has_questionnaire){
+    return `<div class="card" id="bhptwCard"><h3>${r.stage} assessment</h3>
+      <div class="note" style="background:#FBF4E2;color:#6B5320;padding:11px 14px;
+        border-left:3px solid var(--warn)">Complete the Pwin questionnaire
+        before entering Black Hat or PTW data for this pursuit.</div></div>`;
+  }
+  if(!bhptwMode) bhptwMode = r.stage==='Post-PTW' ? 'PTW' : 'BLACK_HAT';
+  const hasDep = BHPTW.has_dependency;
+  const scenario = hasDep ? bhptwStep : 'BASE';
+  const cur = BHPTW.scenarios[scenario] || {};
+  const buf = bhptwBuf[scenario];
+  const val = k => Object.prototype.hasOwnProperty.call(buf,k) ? buf[k] : cur[k];
+  const doneBase = !!BHPTW.scenarios.BASE;
+  const doneDep = !!BHPTW.scenarios.DEPENDENT_WON;
+
+  const modeRow = `<div class="fr edit"><label>Analysis type</label>
+    <div class="fv"><label><input type="radio" name="bhptwMode" value="BLACK_HAT"
+        ${bhptwMode==='BLACK_HAT'?'checked':''}> Black Hat</label>
+      <label style="margin-left:16px"><input type="radio" name="bhptwMode" value="PTW"
+        ${bhptwMode==='PTW'?'checked':''}> PTW</label></div></div>`;
+
+  const depStepper = hasDep ? `<div class="note" style="background:#EAF3DE;color:#2C5209;padding:9px 14px">
+      Dependent pursuit. Two assessments are required \u2014 one assuming
+      <b>${BHPTW.depends_on_name}</b> is lost, one assuming it is won.
+      <div style="margin-top:7px">
+        <button class="btn ${scenario==='BASE'?'':'gh'}" id="bhStepBase" style="padding:2px 9px;font-size:11px">
+          Base (no lift)${doneBase?' \u2713':''}</button>
+        <button class="btn ${scenario==='DEPENDENT_WON'?'':'gh'}" id="bhStepDep" style="padding:2px 9px;font-size:11px">
+          If ${BHPTW.depends_on_name} is won${doneDep?' \u2713':''}</button>
+      </div></div>` : '';
+
+  const blackHatFields = bhptwMode==='BLACK_HAT' ? bhRow('Price aggressiveness (P1)',
+      `<select id="bhP1">${(REF&&REF.p1_options||[]).map(o=>
+        `<option value="${o.code}" ${val('aggressiveness_option_code')===o.code?'selected':''}>${o.label}</option>`
+      ).join('')}</select>`,
+      'Fee = the contract type\u2019s nominal rate plus this option\u2019s delta \u2014 computed on save.') : '';
+
+  const ptwFields = bhptwMode==='PTW' ? bhRow('Margin', pctInput('bhMargin', val('margin_rate'), {max:30}),
+        'Capped at 30% \u2014 replaces the fee formula directly.')
+    + bhRow('Bid price', moneyInput('bhBidPrice', val('bid_price')), '') : '';
+
+  const common = bhRow('Investment', moneyInput('bhInvestment', val('investment')), '')
+    + bhRow('Date completed', `<input id="bhCompleted" type="date" value="${val('completed_date')||''}">`, '')
+    + bhRow('Predicted Pwin', pctInput('bhPwin', val('base_pwin'), {max:100}),
+        'Typed directly \u2014 this phase\u2019s Pwin comes from the analysis, not the engine.');
+
+  const submitLabel = hasDep
+    ? `Save ${scenario==='BASE'?'base':'dependent-won'} assessment`
+    : 'Save assessment';
+
+  return `<div class="card" id="bhptwCard"><h3>${r.stage} assessment</h3>
+    ${depStepper}
+    ${modeRow}
+    ${blackHatFields}
+    ${ptwFields}
+    ${common}
+    <div class="pad" style="border-top:1px solid var(--line)">
+      <button class="btn" id="bhSubmit">${submitLabel}</button>
+    </div></div>`;
+}
+
+function wireBhPtwCard(uid, r){
+  if(!BHPTW){ loadBhPtw(uid, r); return; }
+  if(!BHPTW.has_questionnaire) return;
+  const hasDep = BHPTW.has_dependency;
+  const scenario = hasDep ? bhptwStep : 'BASE';
+
+  $$('input[name="bhptwMode"]').forEach(el=>{
+    el.onchange = e=>{ bhptwMode = e.target.value; detailView(uid); };
+  });
+  const sb = document.getElementById('bhStepBase');
+  if(sb) sb.onclick = ()=>{ bhptwStep='BASE'; detailView(uid); };
+  const sd = document.getElementById('bhStepDep');
+  if(sd) sd.onclick = ()=>{ bhptwStep='DEPENDENT_WON'; detailView(uid); };
+
+  const bind = (id, key, num)=>{
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.onchange = e=>{
+      let v = e.target.value;
+      if(v===''){ bhptwBuf[scenario][key] = null; return; }
+      bhptwBuf[scenario][key] = num ? +v : v;
+    };
+  };
+  bind('bhP1', 'aggressiveness_option_code', false);
+  bind('bhMargin', 'margin_rate', true);
+  bind('bhBidPrice', 'bid_price', true);
+  bind('bhInvestment', 'investment', true);
+  bind('bhCompleted', 'completed_date', false);
+  bind('bhPwin', 'base_pwin', true);
+
+  const submit = document.getElementById('bhSubmit');
+  if(submit) submit.onclick = ()=>submitBhPtw(uid, r, scenario);
+}
+
+async function submitBhPtw(uid, r, scenario){
+  const cur = BHPTW.scenarios[scenario] || {};
+  const buf = bhptwBuf[scenario];
+  const val = k => Object.prototype.hasOwnProperty.call(buf,k) ? buf[k] : cur[k];
+
+  const basePwinPct = val('base_pwin');
+  if(basePwinPct==null){ toast('Enter a predicted Pwin.', true); return; }
+  const body = {
+    scenario,
+    investment: val('investment'),
+    completed_date: val('completed_date') || null,
+    base_pwin: +(basePwinPct/100).toFixed(6),
+  };
+  let path;
+  if(bhptwMode==='BLACK_HAT'){
+    if(!val('aggressiveness_option_code')){ toast('Choose a price aggressiveness option.', true); return; }
+    body.aggressiveness_option_code = val('aggressiveness_option_code');
+    path = 'blackhat';
+  } else {
+    const marginPct = val('margin_rate');
+    if(marginPct==null){ toast('Enter a margin.', true); return; }
+    if(val('bid_price')==null){ toast('Enter a bid price.', true); return; }
+    body.margin_rate = +(marginPct/100).toFixed(6);
+    body.bid_price = val('bid_price');
+    path = 'ptw';
+  }
+
+  try{
+    const res = await fetch(`/api/pursuits/${r.id}/${path}`, {
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)});
+    if(res.status===401){ showLogin(); return; }
+    const resBody = await res.json().catch(()=>({}));
+    if(!res.ok){
+      const msg = typeof resBody.detail==='string' ? resBody.detail
+                : (resBody.detail && resBody.detail[0] && resBody.detail[0].msg)
+                  || `save failed (${res.status})`;
+      toast(msg, true); return;
+    }
+    bhptwBuf[scenario] = {};
+    // Advance to the second assessment a dependent pursuit still needs,
+    // rather than leaving the analyst to notice it themselves.
+    if(BHPTW.has_dependency && scenario==='BASE' && !BHPTW.scenarios.DEPENDENT_WON){
+      await loadBhPtw(uid, r);
+      bhptwStep = 'DEPENDENT_WON';
+      toast(`Base assessment saved. Now enter the assessment assuming `
+          + `${BHPTW.depends_on_name} is won.`);
+      detailView(uid);
+      return;
+    }
+    await loadBhPtw(uid, r);
+    await loadData();
+    detailView(uid);
+    toast('Saved.');
+  }catch(e){ toast(`Could not save: ${e.message}`, true); }
+}
+
+/* ---------- Staffing ---------- */
+function vStaffing(){
+  const s=D.staffing;
+  if(!s.months.length || !s.cats.length){
+    setHTML('#staffing', `<div class="card"><h3>Staffing capacity</h3>
+      <div class="pad"><p style="margin:0">No staffing demand to show. Capacity
+      is drawn from pursuits marked Bid that have a proposal due date.</p></div></div>`);
+    return;
+  }
+
+  // ---- 5-year window, defaulting to the current planning year --------
+  if(staffWinStart===null) staffWinStart = PY;
+  const allYears=[...new Set(s.months.map(m=>+m.slice(0,4)))];
+  const lo=Math.min(...allYears), hi=Math.max(...allYears);
+  // Clamp so the window always contains at least some real data even if
+  // the default (current year) sits outside the range the pipeline
+  // actually covers.
+  if(staffWinStart<lo) staffWinStart=lo;
+  if(staffWinStart>hi) staffWinStart=hi;
+  const winEnd=staffWinStart+4;
+  const idx = s.months.map((m,i)=>i)
+    .filter(i=>{const y=+s.months[i].slice(0,4); return y>=staffWinStart&&y<=winEnd;});
+  const months = idx.map(i=>s.months[i]);
+  const demand = {}; s.cats.forEach(c=>{ demand[c]=idx.map(i=>s.demand[c][i]); });
+  const total = idx.map(i=>s.total[i]);
+
+  if(!months.length){
+    setHTML('#staffing', `<div class="card"><h3>Staffing capacity</h3>
+      <div class="pad"><p style="margin:0">No staffing demand in ${staffWinStart}\u2013${winEnd}.
+      Data covers ${lo}\u2013${hi} \u2014 use the window selector above to
+      move into that range.</p></div></div>`);
+    return;
+  }
+
+  const peak=Math.max(...total), peakM=months[total.indexOf(peak)];
+
+  // "Highest single category": WHEN it peaks, not just how much -- the
+  // year and month, so the number means something without cross-checking
+  // the table beneath it.
+  const catTot=s.cats.map(c=>{
+    const series=demand[c];
+    const pk=Math.max(...series);
+    const pkMonth = pk>0 ? months[series.indexOf(pk)] : null;
+    return {c, peak:pk, peakMonth:pkMonth, tot:series.reduce((a,b)=>a+b,0)};
+  });
+  const topCat = catTot.slice().sort((a,b)=>b.peak-a.peak)[0];
+
+  // Total effort BY YEAR within the window, not one number smeared across
+  // however many years happen to be visible.
+  const yearsInWin = [...new Set(months.map(m=>+m.slice(0,4)))];
+  const effortByYear = yearsInWin.map(y=>({
+    y, total: idx.filter(i=>+s.months[i].slice(0,4)===y)
+                 .reduce((sum,i)=>sum+s.total[i],0)}));
+  const grand = effortByYear.reduce((a,b)=>a+b.total,0);
+
+  const mx=Math.max(...s.cats.flatMap(c=>demand[c]));
+  const heat=v=>{if(v<=0)return '';const t=Math.min(1,v/mx);
+    return `background:rgba(59,109,17,${(0.06+t*0.62).toFixed(3)});color:${t>0.55?'#fff':'#333'}`;};
+  // 2-digit year, smaller -- "2026-01" x 60 months across a table header
+  // reads as noise; "26-01" reads as a date.
+  const shortMonth = m => m.slice(2);
+
+  setHTML('#staffing', `
+  <div class="flag">Window: <b>${staffWinStart}\u2013${winEnd}</b> (data available ${lo}\u2013${hi}).</div>
+  <div class="kpis">
+    <div class="kpi hl"><div class="k">Peak demand</div><div class="v num">${peak.toFixed(0)} FTE</div>
+      <div class="s">${peakM}</div></div>
+    <div class="kpi"><div class="k">Highest single category</div>
+      <div class="v num">${topCat.peak.toFixed(1)}</div>
+      <div class="s">${topCat.c}${topCat.peakMonth?` \u00b7 ${topCat.peakMonth}`:''}</div></div>
+    <div class="kpi" style="grid-column:span 2">
+      <div class="k">Total effort by year <span style="font-weight:400;text-transform:none;letter-spacing:0">(FTE-months)</span></div>
+      <div style="display:flex;gap:16px;margin-top:6px;flex-wrap:wrap">${
+        effortByYear.map(y=>`<div style="text-align:left"><div style="font-size:9.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.08em">${y.y}</div><div class="num" style="font-size:18px;font-weight:600;margin-top:1px">${y.total.toFixed(0)}</div></div>`).join('')}</div>
+      <div class="s" style="margin-top:6px">${grand.toFixed(0)} total in window</div></div>
+    <div class="kpi"><div class="k">Window</div><div class="v num">${months.length} mo</div>
+      <div class="s">${months[0]} \u2013 ${months[months.length-1]}</div></div>
+  </div>
+  <div class="card"><h3>Portfolio FTE demand by month <small>stacked by labor category</small></h3>
+    ${stackedArea(months,s.cats,demand)}${legend(s.cats,s.cats.map((_,i)=>CCOL[i%CCOL.length]))}</div>
+  <div class="card"><h3>Labor category by month <small>FTE \u00b7 peak row at foot</small></h3>
+   <div class="tw staff-scroll"><table class="staff-tbl"><thead><tr><th style="position:sticky;left:0;background:#EDEDED;z-index:2">Labor category</th>
+     ${months.map(m=>`<th class="r">${shortMonth(m)}</th>`).join('')}<th class="r">Peak</th><th class="r">Total</th></tr></thead>
+   <tbody>${s.cats.map(c=>`<tr><td style="position:sticky;left:0;background:#fff">${c}</td>
+     ${demand[c].map(v=>`<td class="r num"><span class="heat" style="${heat(v)}">${v>0?v.toFixed(1):'\u00b7'}</span></td>`).join('')}
+     <td class="r num"><b>${Math.max(...demand[c]).toFixed(1)}</b></td>
+     <td class="r num">${demand[c].reduce((a,b)=>a+b,0).toFixed(0)}</td></tr>`).join('')}
+   </tbody><tfoot><tr><td style="position:sticky;left:0;background:#F7F7F7">Peak FTE by month</td>
+     ${total.map(v=>`<td class="r num"${v===peak?' style="color:#8C2F27"':''}>${v.toFixed(0)}</td>`).join('')}
+     <td class="r num" style="color:#8C2F27">${peak.toFixed(0)}</td><td class="r num">${grand.toFixed(0)}</td></tr></tfoot></table></div>
+   <div class="note">Demand is spread from each pursuit's proposal due date backward across its
+     phase durations, matching the engine's staffing model. Cell shading is relative to the
+     highest single category-month in this window.</div></div>`);
+}
+
+/* ---------- Revenue ---------- */
+function vRevenue(){
+  const by=byYear();
+  const revS=[{name:'Target',v:YRS.map(y=>TG[y].rev_target||0)},{name:'Probabilistic',v:by.map(r=>r.rev)}];
+  const feeS=[{name:'Target',v:YRS.map(y=>TG[y].fee_target||0)},{name:'Probabilistic',v:by.map(r=>r.fee)}];
+  $('#revenue').innerHTML=`
+  <div class="grid g2">
+   <div class="card"><h3>Revenue \u2014 probabilistic vs. target</h3>${barsGrouped(revS,YRS,['#B8B8B8','#3B6D11'])}${legend(['Target','Probabilistic'],['#B8B8B8','#3B6D11'])}</div>
+   <div class="card"><h3>Fee \u2014 probabilistic vs. target</h3>${barsGrouped(feeS,YRS,['#B8B8B8','#4E8A1B'])}${legend(['Target','Probabilistic'],['#B8B8B8','#4E8A1B'])}</div>
+  </div>
+  <div class="card"><h3>Projection detail</h3>
+   <div class="tw"><table><thead><tr><th>Year</th><th class="r">Revenue target</th><th class="r">Probabilistic revenue</th>
+     <th class="r">Gap</th><th class="r">Fee target</th><th class="r">Probabilistic fee</th><th class="r">Gap</th></tr></thead>
+   <tbody>${by.map((r,i)=>{const t=TG[YRS[i]],gr=r.rev-(t.rev_target||0),gf=r.fee-(t.fee_target||0);
+     const c=v=>v>=0?'color:#3B6D11':'color:#8C2F27';
+     return `<tr${YRS[i]===selYear?' class="sel"':''}><td class="num">${r.y}</td><td class="r num">${money(t.rev_target||0)}</td>
+       <td class="r num">${money(r.rev)}</td><td class="r num" style="${c(gr)}">${gr>=0?'+':''}${money(gr)}</td>
+       <td class="r num">${money(t.fee_target||0)}</td><td class="r num">${money(r.fee)}</td>
+       <td class="r num" style="${c(gf)}">${gf>=0?'+':''}${money(gf)}</td></tr>`;}).join('')}
+   </tbody><tfoot><tr><td>Total</td><td class="r num">${money(sum(YRS,y=>TG[y].rev_target||0))}</td>
+     <td class="r num">${money(sum(by,r=>r.rev))}</td><td class="r num"></td>
+     <td class="r num">${money(sum(YRS,y=>TG[y].fee_target||0))}</td><td class="r num">${money(sum(by,r=>r.fee))}</td>
+     <td class="r num"></td></tr></tfoot></table></div>
+   <div class="note">Every year counts open and closed pursuits marked Bid \u2014 the question is
+     whether the plan is being met, and won work is the largest part of the near years.
+     Cancelled and no-bid pursuits are excluded. Toggling a pursuit to no-bid on the
+     Pursuits page removes it here immediately.</div></div>`;
+}
+
+/* ---------- B&P ---------- */
+function vBP(){
+  const by=byYear();
+  const bpS=[{name:'Budget',v:YRS.map(y=>TG[y].bp_budget||0)},{name:'Required',v:by.map(r=>r.bp)}];
+  const ivS=[{name:'Budget',v:YRS.map(y=>TG[y].inv_budget||0)},{name:'Planned',v:by.map(r=>r.inv)}];
+  const top=[...OPEN].sort((a,b)=>b.bp-a.bp).slice(0,12);
+  const inv=[...OPEN].filter(x=>x.inv>0).sort((a,b)=>b.inv-a.inv).slice(0,12);
+  const invTot=sum(OPEN,x=>x.inv), invBud=sum(YRS,y=>TG[y].inv_budget||0);
+  $('#bp').innerHTML=`
+  <div class="grid g2">
+   <div class="card"><h3>B&amp;P \u2014 required vs. budget</h3>${barsGrouped(bpS,YRS,['#B8B8B8','#8A6A17'])}${legend(['Budget','Required'],['#B8B8B8','#8A6A17'])}</div>
+   <div class="card"><h3>Investment \u2014 planned vs. budget</h3>${barsGrouped(ivS,YRS,['#B8B8B8','#3B6D11'])}${legend(['Budget','Planned'],['#B8B8B8','#3B6D11'])}</div>
+  </div>
+  <div class="card"><h3>Budget position by year</h3>
+   <div class="tw"><table><thead><tr><th>Year</th><th class="r">B&amp;P budget</th><th class="r">B&amp;P required</th>
+     <th class="r">Variance</th><th class="r">Investment budget</th><th class="r">Investment planned</th><th class="r">Variance</th></tr></thead>
+   <tbody>${by.map((r,i)=>{const t=TG[YRS[i]],vb=(t.bp_budget||0)-r.bp,vi=(t.inv_budget||0)-r.inv;
+     const c=v=>v>=0?'color:#3B6D11':'color:#8C2F27';
+     return `<tr${YRS[i]===selYear?' class="sel"':''}><td class="num">${r.y}</td><td class="r num">${money(t.bp_budget||0)}</td>
+       <td class="r num">${money(r.bp)}</td><td class="r num" style="${c(vb)}">${vb>=0?'+':''}${money(vb)}</td>
+       <td class="r num">${money(t.inv_budget||0)}</td><td class="r num">${money(r.inv)}</td>
+       <td class="r num" style="${c(vi)}">${vi>=0?'+':''}${money(vi)}</td></tr>`;}).join('')}
+   </tbody></table></div></div>
+  <div class="card"><h3>Largest B&amp;P commitments <small>top 12 open pursuits</small></h3>
+   <div class="tw"><table><thead><tr><th>Opportunity name</th><th>Market</th><th class="r">Award value</th>
+     <th class="r">B&amp;P required</th><th class="r">B&amp;P as % of value</th><th class="r">Pwin</th></tr></thead>
+   <tbody>${top.map(r=>`<tr class="${depRow(r.uid).trim()}"><td><b>${r.name}</b>${depMark(r.uid)}</td><td>${r.market}</td><td class="r num">${money(r.value)}</td>
+     <td class="r num">${money(r.bp)}</td><td class="r num">${r.value?(r.bp/r.value*100).toFixed(2):'\u2014'}%</td>
+     <td class="r">${pwinCell(effectivePwin(r))}</td></tr>`).join('')}</tbody></table></div></div>
+  <div class="card"><h3>Largest investment commitments
+     <small>${inv.length} pursuits carrying investment &middot; ${M(invTot)} of ${M(invBud)} budgeted</small></h3>
+   <div class="tw"><table><thead><tr><th>Opportunity name</th><th>Market</th><th>Opportunity type</th>
+     <th class="r">Award value</th><th class="r">Invest %</th><th class="r">Investment</th>
+     <th class="r">Pwin</th><th class="r">$ per Pwin point</th></tr></thead>
+   <tbody>${inv.length?inv.map(r=>`<tr class="${depRow(r.uid).trim()}">
+     <td><b>${r.name}</b>${depMark(r.uid)}</td><td>${r.market}</td>
+     <td style="font-size:11px;color:var(--ink-2)">${(r.type||'\u2014').slice(0,38)}</td>
+     <td class="r num">${money(r.value)}</td>
+     <td class="r num">${r.invpct==null?'\u2014':(r.invpct*100).toFixed(1)+'%'}</td>
+     <td class="r num">${money(r.inv)}</td>
+     <td class="r">${pwinCell(effectivePwin(r))}</td>
+     <td class="r num">${r.pwin?money(r.inv/(r.pwin*100)):'\u2014'}</td></tr>`).join('')
+     :'<tr><td colspan="8" style="color:#888;padding:14px">No pursuits carry investment.</td></tr>'}
+   </tbody><tfoot><tr><td>Total &middot; all investment pursuits</td><td colspan="2"></td>
+     <td class="r num">${money(sum(OPEN.filter(x=>x.inv>0),x=>x.value))}</td><td></td>
+     <td class="r num">${money(invTot)}</td><td colspan="2"></td></tr></tfoot></table></div>
+   <div class="note">Investment is rare and deliberate \u2014 it belongs on developmental work or
+     where a well-performing incumbent has to be displaced. The last column is a crude
+     efficiency screen: dollars committed per point of Pwin. It only means anything compared
+     before and after a recalculation in the sandbox.</div></div>`;
+}
+
+/* ---------- Targets ---------- */
+function vTargets(){
+  if(!Object.keys(TG).length){
+    $('#targets').innerHTML = `<div class="card"><h3>Targets &amp; budgets</h3>
+      <div class="pad"><p style="margin:0">No annual plan has been set for the
+      business unit assigned to this account.</p></div></div>`;
+    return;
+  }
+  $('#targets').innerHTML=`
+  <div class="flag">Targets and budgets drive every variance shown elsewhere. Edits apply immediately.</div>
+  <div class="card"><h3>Annual operating plan inputs</h3>
+   <div class="tw"><table><thead><tr><th>Year</th><th class="r">Escalation</th><th class="r">Revenue target</th>
+     <th class="r">Fee target</th><th class="r">B&amp;P budget</th><th class="r">Investment budget</th></tr></thead>
+   <tbody>${YRS.map(y=>`<tr><td class="num">${y}</td>
+     <td class="r"><input class="inp num" type="number" step="0.001" value="${TG[y].esc??0}" data-y="${y}" data-f="esc" style="width:80px"></td>
+     <td class="r"><input class="inp num" type="number" step="100000" value="${TG[y].rev_target||0}" data-y="${y}" data-f="rev_target"></td>
+     <td class="r"><input class="inp num" type="number" step="100000" value="${TG[y].fee_target||0}" data-y="${y}" data-f="fee_target"></td>
+     <td class="r"><input class="inp num" type="number" step="50000" value="${TG[y].bp_budget||0}" data-y="${y}" data-f="bp_budget"></td>
+     <td class="r"><input class="inp num" type="number" step="50000" value="${TG[y].inv_budget||0}" data-y="${y}" data-f="inv_budget"></td></tr>`).join('')}
+   </tbody><tfoot><tr><td>Total</td><td></td>
+     <td class="r num">${money(sum(YRS,y=>TG[y].rev_target||0))}</td>
+     <td class="r num">${money(sum(YRS,y=>TG[y].fee_target||0))}</td>
+     <td class="r num">${money(sum(YRS,y=>TG[y].bp_budget||0))}</td>
+     <td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0))}</td></tr></tfoot></table></div>
+   <div class="note">In the workbook these live on the Dashboard sheet. Here they are per business unit
+     and per planning year, so a division and its parent can hold different plans.</div></div>`;
+  $$('#targets input').forEach(inp=>inp.onchange=e=>{
+    TG[+e.target.dataset.y][e.target.dataset.f]=+e.target.value; render();});
+}
+
+/* ---------- Sandbox ---------- */
+let SB=null, sbSel=null;
+function sbInit(){SB={};P.forEach(x=>{SB[x.uid]={inc:!x.outcome&&x.bid==='Bid',ans:{...x.answers},
+  pwin:x.pwin,dirty:false,pending:false};});sbSel=null;}
+
+function vSandbox(){
+  if(!SB)sbInit();
+  const inc=P.filter(x=>SB[x.uid].inc);
+  const scale=x=>{const b=x.pwin||0,n=SB[x.uid].pwin||0;return b>0?n/b:1;};
+  const by=YRS.map((y,i)=>({y,rev:sum(inc,x=>yearOf(x,i).rev*scale(x)),
+    fee:sum(inc,x=>yearOf(x,i).fee*scale(x)),bp:sum(inc,x=>yearOf(x,i).bp),inv:sum(inc,x=>yearOf(x,i).inv)}));
+  const base=YRS.map((y,i)=>yearAgg(listFor(),i));
+  const i0=YRS.indexOf(selYear);
+  const dirty=P.filter(x=>SB[x.uid].dirty);
+  const revS=[{name:'Target',v:YRS.map(y=>TG[y].rev_target||0)},{name:'Baseline',v:base.map(r=>r.rev)},{name:'Scenario',v:by.map(r=>r.rev)}];
+  const bpS=[{name:'Budget',v:YRS.map(y=>TG[y].bp_budget||0)},{name:'Baseline',v:base.map(r=>r.bp)},{name:'Scenario',v:by.map(r=>r.bp)}];
+  const ivS=[{name:'Budget',v:YRS.map(y=>TG[y].inv_budget||0)},{name:'Baseline',v:base.map(r=>r.inv)},{name:'Scenario',v:by.map(r=>r.inv)}];
+  $('#sandbox').innerHTML=`
+  <div class="flag">A sandbox is a private copy of the portfolio \u2014 nothing here is saved.
+    Bid toggles on the <b>Pursuits</b> page write to the database; these do not.
+    Changing questionnaire answers recomputes
+    Tech, Mgmt, Past Performance and Price locally using the same scoring tables as the workbook.
+    <b>Pwin itself requires the engine</b> \u2014 press Recalculate to send the scenario to api.cda-us.com.</div>
+  <div class="kpis">
+   <div class="kpi hl"><div class="k">Scenario pursuits</div><div class="v num">${inc.length}</div>
+     <div class="s">of ${P.length} \u00b7 ${M(sum(inc,x=>x.value))}</div></div>
+   <div class="kpi hl"><div class="k">${selYear} revenue</div><div class="v num">${M(by[i0].rev)}</div>
+     <div class="s ${by[i0].rev-(TG[selYear].rev_target||0)>=0?'up':'dn'}">${by[i0].rev-(TG[selYear].rev_target||0)>=0?'+':''}${M(by[i0].rev-(TG[selYear].rev_target||0))} vs target</div></div>
+   <div class="kpi"><div class="k">${selYear} B&amp;P</div><div class="v num">${M(by[i0].bp)}</div>
+     <div class="s ${(TG[selYear].bp_budget||0)-by[i0].bp>=0?'up':'dn'}">${(TG[selYear].bp_budget||0)-by[i0].bp>=0?'+':''}${M((TG[selYear].bp_budget||0)-by[i0].bp)} vs budget</div></div>
+   <div class="kpi"><div class="k">${selYear} investment</div><div class="v num">${M(by[i0].inv)}</div>
+     <div class="s ${(TG[selYear].inv_budget||0)-by[i0].inv>=0?'up':'dn'}">${(TG[selYear].inv_budget||0)-by[i0].inv>=0?'+':''}${M((TG[selYear].inv_budget||0)-by[i0].inv)} vs budget</div></div>
+   <div class="kpi"><div class="k">Pursuits changed</div><div class="v num">${dirty.length}</div>
+     <div class="s">${P.filter(x=>SB[x.uid].pending).length} awaiting engine</div></div>
+  </div>
+  <div class="grid g3">
+   <div class="card"><h3>Revenue</h3>${barsGrouped(revS,YRS,['#B8B8B8','#888888','#3B6D11'],{w:520,h:170})}${legend(['Target','Baseline','Scenario'],['#B8B8B8','#888888','#3B6D11'])}</div>
+   <div class="card"><h3>B&amp;P</h3>${barsGrouped(bpS,YRS,['#B8B8B8','#888888','#8A6A17'],{w:520,h:170})}${legend(['Budget','Baseline','Scenario'],['#B8B8B8','#888888','#8A6A17'])}</div>
+   <div class="card"><h3>Investment</h3>${barsGrouped(ivS,YRS,['#B8B8B8','#888888','#3B6D11'],{w:520,h:170})}${legend(['Budget','Baseline','Scenario'],['#B8B8B8','#888888','#3B6D11'])}</div>
+  </div>
+  <div class="card"><h3>Scenario pursuits
+     <small><button class="btn" id="sbRun">Recalculate all changed</button>
+     <button class="btn gh" id="sbReset">Reset to baseline</button></small></h3>
+   <div class="tw"><table><thead><tr><th class="r">Bid</th><th>Opportunity name</th><th>Market</th>
+     <th class="r">Award value</th><th class="r">B&amp;P ${selYear}</th>
+     <th class="r">Answers changed</th><th class="r">Pwin</th>
+     <th class="r">Scenario revenue ${selYear}</th><th></th></tr></thead>
+   <tbody>${P.filter(x=>!x.outcome).map(x=>{const s=SB[x.uid];
+     const nch=Object.keys(x.answers||{}).filter(k=>s.ans[k]!==(x.answers||{})[k]).length;
+     return `<tr class="${x.uid===sbSel?'sel ':''}${depRow(x.uid).trim()}${s.inc?'':' nobid'}">
+     <td class="r"><label class="tg"><input type="checkbox" data-u="${x.uid}" class="sbIn"
+       ${s.inc?'checked':''}><span></span></label></td>
+     <td><b>${x.name}</b>${depMark(x.uid)}</td><td>${x.market}</td>
+     <td class="r num">${money(x.value)}</td>
+     <td class="r num">${s.inc?money(yearOf(x,i0).bp):'<span style="color:#888">\u2014</span>'}</td>
+     <td class="r num">${nch?`<span class="chg up2">${nch}</span>`:'\u2014'}</td>
+     <td class="r num">${s.dirty?'<span style="color:#8A6A17">recalculate</span>':pwinPct(s.pwin)}</td>
+     <td class="r num">${money(yearOf(x,i0).rev*(x.pwin?(s.pwin/x.pwin):1)*(s.inc?1:0))}</td>
+     <td class="r"><button class="btn gh" data-q="${x.uid}" style="padding:2px 8px;font-size:11px">Answers</button></td></tr>`;}).join('')}
+   </tbody><tfoot><tr><td class="r num">${inc.length}</td><td>Scenario total</td><td></td>
+     <td class="r num">${money(sum(inc,x=>x.value))}</td><td colspan="5"></td>
+     <td class="r num">${money(by[i0].rev)}</td><td></td></tr></tfoot></table></div>
+   <div class="note">Changing an answer marks the pursuit for recalculation. Pwin is returned by the
+     engine \u2014 scoring weights, price position and the tournament solve stay server-side.</div></div>
+  <div id="sbq"></div>`;
+  $$('.sbIn').forEach(c=>c.onchange=e=>{SB[e.target.dataset.u].inc=e.target.checked;vSandbox();});
+  $$('#sandbox .tg').forEach(l=>l.onclick=e=>e.stopPropagation());
+  $$('[data-q]').forEach(b=>b.onclick=()=>{sbSel=b.dataset.q;vSandbox();sbQ(sbSel);});
+  $('#sbReset').onclick=()=>{sbInit();vSandbox();};
+  $('#sbRun').onclick=async()=>{
+    const dirty=P.filter(x=>SB[x.uid].dirty);
+    for(const x of dirty){ SB[x.uid].pending=true; }
+    vSandbox();
+    for(const x of dirty){ await sbRecalcOne(x.uid); }
+    vSandbox(); if(sbSel) sbQ(sbSel);};
+  if(sbSel)sbQ(sbSel);
+}
+const SCORED_UI_KEYS=['TM 1a','TM 1b','TM 2','TM 3','TM 4','TM 5','PP 1','P 1'];
+async function sbRecalcOne(uid){
+  const x=P.find(p=>p.uid===uid), s=SB[uid];
+  if(!x||!s) return;
+  const answers={};
+  SCORED_UI_KEYS.forEach(k=>{ if(s.ans[k]) answers[k.replace(/\s+/g,'').toUpperCase()]=s.ans[k]; });
+  try{
+    const res=await fetch(`/api/pursuits/${x.id}/recalculate/preview`,{
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({answers})});
+    if(res.status===401){ showLogin(); return; }
+    const body=await res.json().catch(()=>({}));
+    s.pending=false;
+    if(!res.ok){
+      const msg = typeof body.detail==='string' ? body.detail
+                : (body.detail && body.detail[0] && body.detail[0].msg)
+                  || `recalculation failed (${res.status})`;
+      toast(msg, true); return;
+    }
+    s.pwin=body.pwin; s.dirty=false;
+  }catch(e){ s.pending=false; toast(`Could not reach the Pwin engine: ${e.message}`, true); }
+}
+function sbQ(uid){
+  const x=P.find(p=>p.uid===uid),s=SB[uid];
+  if(!x||!s){ sbSel=null; return; }
+  const kids=DEPENDENTS[uid]||[], parent=DEPS_OF[uid];
+  const nch=Object.keys(x.answers).filter(k=>s.ans[k]!==x.answers[k]).length;
+  $('#sbq').innerHTML=`<div class="card"><h3>Pwin questionnaire \u2014 ${x.name}
+     <small>${x.type||''} \u00b7 ${x.bidders??'?'} bidders</small></h3>
+   <div class="sc" style="border-bottom:1px solid var(--line);background:#FAFAFA">
+     <div>Current Pwin<b>${pwinPct(effectivePwin(x))}</b></div>
+     <div>Scenario Pwin<b>${s.dirty?'recalculate':pwinPct(s.pwin)}</b></div>
+     <div>Answers changed<b>${nch}</b></div>
+     <div>Bidders<b>${x.bidders??'\u2014'}</b></div>
+   </div>
+   ${(kids.length||parent)?`<div class="note" style="background:#EAF3DE;color:#2C5209;padding:9px 14px">
+     ${parent?`This pursuit depends on <b>${oppName(parent)}</b> (ID ${oppRef(parent)}) \u2014 its Pwin is conditional on that award. `:''}
+     ${kids.length?`<b>${kids.length}</b> pursuit(s) depend on this one: ${kids.map(v=>oppName(v)+' (ID '+oppRef(v)+')').join(', ')} \u2014 changing this Pwin re-solves theirs.`:''}
+   </div>`:''}
+   <div class="qa">${renderQ(s.ans,x.answers,x.type,true)}</div>
+   <div class="pad" style="display:flex;gap:8px;align-items:center;border-top:1px solid var(--line)">
+     <button class="btn" id="sbCalc">Recalculate Pwin</button>
+     <button class="btn gh" id="sbRevert">Revert this pursuit</button>
+     <span style="font-size:11px;color:#888;margin-left:auto">Pwin is computed by the engine.</span></div></div>`;
+  $$('#sbq [data-a]').forEach(sel=>sel.onchange=e=>{
+    SB[uid].ans[e.target.dataset.a]=e.target.value;
+    cascade(SB[uid].ans, x.type);
+    SB[uid].dirty=JSON.stringify(SB[uid].ans)!==JSON.stringify(x.answers);
+    vSandbox();});
+  $('#sbRevert').onclick=()=>{SB[uid].ans={...x.answers};SB[uid].dirty=false;SB[uid].pending=false;SB[uid].pwin=x.pwin;vSandbox();};
+  $('#sbCalc').onclick=async()=>{SB[uid].pending=true;vSandbox();
+    await sbRecalcOne(uid); vSandbox(); sbQ(uid);};
+  $('#sbq').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+/* ---------- Import ---------- */
+/* Staged rows are illustrative of an import batch: what a CRM pull gives you,
+   and what it cannot give you. Pwin is ALWAYS outstanding -- no CRM holds the
+   questionnaire, so every imported pursuit must still be assessed. */
+const IMPORT_BATCH=[
+ {id:'OPP-44812',name:'Trestle Sensor Refresh',market:'GSS',value:31500000,type:'Existing product solution, little modification required',
+  ctr:'Fixed Price',bp:'2027-02-15',due:'2027-07-30',award:'2027-11-12',end:null,bidders:3,miss:['end']},
+ {id:'OPP-44815',name:'Cascade Ground Terminal',market:null,value:84000000,type:'Developmental/New Product',
+  ctr:'Cost Plus',bp:'2027-01-05',due:'2027-06-18',award:'2027-10-01',end:'2032-09-30',bidders:null,miss:['market','bidders']},
+ {id:'OPP-44821',name:'Halyard Depot Support',market:'SUS',value:12250000,type:'Sustainment/O&M',
+  ctr:'Time & Materials',bp:'2026-11-02',due:'2027-03-14',award:'2027-06-20',end:'2030-06-19',bidders:4,miss:[]},
+ {id:'OPP-44830',name:'Meridian Waveform Port',market:'ACP',value:null,type:'Engineering/Technical Services',
+  ctr:null,bp:'2027-04-01',due:'2027-08-22',award:'2027-12-05',end:'2031-12-04',bidders:2,miss:['value','ctr']},
+ {id:'OPP-44833',name:'Basalt Trainer Upgrade',market:'TRN',value:6800000,type:'Sustainment/O&M',
+  ctr:'Fixed Price',bp:'2026-09-28',due:'2027-01-16',award:'2027-04-30',end:'2029-04-29',bidders:3,miss:[]},
+ {id:'OPP-44840',name:'Kestrel Payload Study',market:'SPC',value:47900000,type:'Developmental/New Product',
+  ctr:'Cost Plus',bp:null,due:'2027-09-10',award:'2028-01-22',end:'2033-01-21',bidders:3,miss:['bp']},
+ {id:'OPP-44851',name:'Inlet Network Recompete',market:'MSN',value:22400000,type:'Engineering/Technical Services',
+  ctr:'Fixed Price',bp:'2027-03-09',due:'2027-07-24',award:'2027-11-30',end:'2031-11-29',bidders:3,miss:[]},
+];
+const FLD={id:'Opportunity ID',name:'Opportunity name',market:'Market',value:'Award value',
+  type:'Opportunity type',ctr:'Contract type',bp:'B&P start',due:'Proposal due',
+  award:'Contract award',end:'Period end',bidders:'Bidders'};
+
+function vImport(){
+  const B=IMPORT_BATCH;
+  const clean=B.filter(r=>!r.miss.length).length;
+  const cell=(r,k)=>{
+    const v=r[k];
+    if(v==null||v==='') return `<td class="att">missing</td>`;
+    if(k==='value') return `<td class="r num">${money(v)}</td>`;
+    if(k==='bidders') return `<td class="r num">${v}</td>`;
+    if(['bp','due','award','end'].includes(k)) return `<td class="num">${v}</td>`;
+    return `<td>${v}</td>`;};
+  $('#import').innerHTML=`
+  <div class="card"><h3>Import a pipeline</h3>
+   <div class="stepbar">
+     <div class="step on"><b>1 &middot; Source</b>Connect a CRM or upload a file</div>
+     <div class="step on"><b>2 &middot; Map fields</b>Match source columns to CPDE fields</div>
+     <div class="step on"><b>3 &middot; Review</b>Resolve anything flagged in red</div>
+     <div class="step"><b>4 &middot; Assess Pwin</b>Answer the questionnaire per pursuit</div>
+     <div class="step"><b>5 &middot; Commit</b>Add to the live pipeline</div>
+   </div>
+   <div class="src">
+     <div class="srcc"><span class="st st-live">Connected</span>
+       <h4>Salesforce</h4><p>REST API v66.0 via External Client App. Reads the
+       Opportunity object; Bulk API 2.0 for the initial backfill.</p>
+       <button class="btn gh">Sync now</button></div>
+     <div class="srcc"><span class="st st-plan">Available</span>
+       <h4>Microsoft Dynamics 365</h4><p>Dataverse Web API. Reads the Opportunity
+       table via OData.</p><button class="btn gh">Connect</button></div>
+     <div class="srcc"><span class="st st-plan">Available</span>
+       <h4>HubSpot</h4><p>CRM v3 Deals API with private-app tokens.</p>
+       <button class="btn gh">Connect</button></div>
+     <div class="srcc"><span class="st st-plan">Available</span>
+       <h4>Deltek GovWin IQ</h4><p>Opportunity search API. Public-sector
+       solicitations rather than internal pipeline.</p><button class="btn gh">Connect</button></div>
+     <div class="srcc"><span class="st st-file">File</span>
+       <h4>Excel / CSV</h4><p>Upload the CPDE workbook or any sheet, then map
+       columns. No connection required.</p><button class="btn">Upload file</button></div>
+     <div class="srcc"><span class="st st-file">File</span>
+       <h4>CPDE workbook</h4><p>Import directly from an existing
+       Pipeline Decision Engine .xlsm.</p><button class="btn gh">Upload workbook</button></div>
+   </div>
+   <div class="note">Every connector is read-only. CPDE never writes back to the
+     system of record.</div></div>
+
+  <div class="kpis">
+    <div class="kpi hl"><div class="k">Staged</div><div class="v num">${B.length}</div><div class="s">from Salesforce &middot; today</div></div>
+    <div class="kpi"><div class="k">Complete</div><div class="v num ok">${clean}</div><div class="s">no fields missing</div></div>
+    <div class="kpi" style="border-top:2px solid #8C2F27"><div class="k">Need attention</div>
+      <div class="v num" style="color:#8C2F27">${B.length-clean}</div><div class="s">missing required data</div></div>
+    <div class="kpi" style="border-top:2px solid #8C2F27"><div class="k">Pwin outstanding</div>
+      <div class="v num" style="color:#8C2F27">${B.length}</div><div class="s">questionnaire required</div></div>
+  </div>
+
+  <div class="card"><h3>Staged pursuits <small>red cells must be resolved before commit</small></h3>
+   <div class="tw"><table><thead><tr>
+     ${Object.values(FLD).map(h=>`<th class="${['Award value','Bidders'].includes(h)?'r':''}">${h}</th>`).join('')}
+     <th>Pwin</th><th>Status</th></tr></thead>
+   <tbody>${B.map(r=>`<tr>${Object.keys(FLD).map(k=>cell(r,k)).join('')}
+     <td class="att">not assessed</td>
+     <td>${r.miss.length?`<span class="needs">${r.miss.length} field${r.miss.length>1?'s':''}</span>`
+       :'<span class="ok">data complete</span>'}</td></tr>`).join('')}
+   </tbody></table></div>
+   <div class="note"><b>Pwin is red on every row, including the complete ones.</b>
+     No CRM stores the questionnaire \u2014 a Salesforce opportunity has a sales-stage
+     probability, not a computed Pwin. Imported pursuits carry dates, values and
+     identifiers; the competitive assessment still has to be answered. Rows can be
+     staged without it, but they will not contribute to any projection until it is.</div>
+   <div class="pad" style="border-top:1px solid var(--line);display:flex;gap:8px;align-items:center">
+     <button class="btn">Assess Pwin for ${B.length} pursuits</button>
+     <button class="btn gh">Resolve missing fields</button>
+     <button class="btn gh">Discard batch</button>
+     <span style="font-size:11px;color:#888;margin-left:auto">Commit is disabled until
+       every red cell is cleared</span></div></div>
+
+  <div class="card"><h3>Field mapping <small>Salesforce Opportunity &rarr; CPDE</small></h3>
+   <div class="tw"><table><thead><tr><th>CPDE field</th><th>Source field</th>
+     <th>Type</th><th>Notes</th></tr></thead>
+   <tbody>
+     <tr><td>Opportunity ID</td><td class="num">Opportunity.Id</td><td>text</td><td>Natural key; dedupes on re-sync</td></tr>
+     <tr><td>Opportunity name</td><td class="num">Opportunity.Name</td><td>text</td><td></td></tr>
+     <tr><td>Award value</td><td class="num">Opportunity.Amount</td><td>currency</td><td>Total contract value, not annual</td></tr>
+     <tr><td>Contract award</td><td class="num">Opportunity.CloseDate</td><td>date</td><td></td></tr>
+     <tr><td>Market</td><td class="att">unmapped</td><td>picklist</td><td>CDA-provisioned; no Salesforce equivalent</td></tr>
+     <tr><td>Bidders</td><td class="att">unmapped</td><td>integer</td><td>Rarely tracked in CRM</td></tr>
+     <tr><td>B&amp;P start / Proposal due</td><td class="num">custom field</td><td>date</td><td>Org-specific; map per client</td></tr>
+     <tr><td>Pwin</td><td class="att">not importable</td><td>\u2014</td><td>Computed by the engine from the questionnaire</td></tr>
+   </tbody></table></div>
+   <div class="note">Salesforce restricted new Connected App creation in Spring '26 \u2014
+     integrations should be built as External Client Apps. Field mapping is saved per
+     client, since custom field names differ by org.</div></div>`;
+}
+
+/* ---------- router ---------- */
+const TITLES={dash:'Portfolio Dashboard',pursuits:'Pursuits',staffing:'Staffing Capacity',
+  revenue:'Revenue & Profit Projection',bp:'B&P and Investment',sandbox:'Scenario Sandbox',
+  targets:'Targets & Budgets',import:'Import'};
+let cur='dash';
+function emptyState(){
+  restoreViewContainers();
+  const who = D.user ? D.user.email : 'your account';
+  const html = `<div class="card"><h3>Nothing in scope</h3>
+    <div class="pad">
+      <p style="margin-top:0">There are no pursuits visible to <b>${who}</b>.</p>
+      <p>This is not an error. Access is scoped to a place in the
+         organisation, and the business unit or division assigned to this
+         account does not hold any pursuits yet.</p>
+      <p style="margin-bottom:0;color:var(--ink-3);font-size:11.5px">
+         If you expect to see pursuits here, an administrator can widen the
+         scope assigned to this account, or move pursuits into this business
+         unit.</p></div></div>`;
+  ['dash','pursuits','staffing','revenue','bp','sandbox'].forEach(v=>{
+    const el=$('#'+v); if(el) el.innerHTML=html;});
+  vTargets(); vImport();          // these work with no pursuits
+  tools(cur);
+}
+
+function render(){
+  restoreViewContainers();
+  // Views assume a non-empty portfolio in several places -- peak staffing
+  // sorts and takes [0], the dashboard indexes the plan by year. Guard once
+  // here instead of scattering null checks through all of them.
+  if(!P.length){ emptyState(); return; }
+  vDash();vPursuits();vStaffing();vRevenue();vBP();vSandbox();vTargets();vImport();tools(cur);
+}
+function show(v){cur=v;
+  $$('.view').forEach(x=>x.classList.remove('on'));
+  $$('#nav a').forEach(x=>x.classList.remove('on'));
+  $('#'+v).classList.add('on');
+  document.querySelector(`#nav a[data-v="${v}"]`).classList.add('on');
+  $('#title').textContent=TITLES[v];tools(v);window.scrollTo(0,0);}
+$$('#nav a').forEach(a=>a.onclick=()=>{presenceStop();show(a.dataset.v);});
+window.addEventListener('beforeunload', presenceStop);
+
+
+
+
+/* ---------- question help ----------
+   Ported verbatim in substance from PwinForm.ShowHelp_. TM1a and TM1b have
+   separate text per opportunity type, exactly as the form does. */
+const HELP = {
+ 'TM 1a': {
+  PRODUCT:['1a. Does our product perform better than our competitor?',
+   "Compare your product's performance specifications directly against the competitor most likely to win.\n\n"+
+   "\u2014 Better \u2014 Your product outperforms on the key technical criteria the customer cares about.\n"+
+   "\u2014 Same \u2014 Performance is roughly equivalent.\n"+
+   "\u2014 Worse \u2014 The competitor's product has a measurable performance advantage."],
+  SERVICES:['1a. Have we done a job like this before?',
+   "This question asks whether your company has direct experience performing work similar to this pursuit \u2014 not just related work, but the same type of job.\n\n"+
+   "\u2014 On contract today \u2014 You are currently performing this type of work for this or a similar customer.\n"+
+   "\u2014 Yes, but not as many building blocks as competitor \u2014 You have done similar work but your experience is less complete than your strongest competitor's.\n"+
+   "\u2014 No, but our teammates are on contract today \u2014 You don't have direct experience but a teaming partner does. Only select this if the teammate is doing the actual work, not just lending their name.\n"+
+   "\u2014 No \u2014 Neither you nor your teammates have relevant direct experience."]},
+ 'TM 1b': {
+  PRODUCT:['1b. Is our Technical Solution more mature than competitors?',
+   "Maturity here means how far along your product is in development and field validation relative to competitors.\n\n"+
+   "\u2014 More Mature \u2014 Your product is further along in development, testing, or fielding than competitors.\n"+
+   "\u2014 Same Level \u2014 Roughly equivalent maturity.\n"+
+   "\u2014 Less Mature \u2014 A competitor has a more developed or proven solution."],
+  SERVICES:['1b. Have our competitors done a job like this before?',
+   "This mirrors Q1a but focuses on your strongest competitor's experience, not yours.\n\n"+
+   "\u2014 On contract today \u2014 Your primary competitor is currently performing this type of work.\n"+
+   "\u2014 Yes, but not as many building blocks as us \u2014 They have experience but yours is stronger.\n"+
+   "\u2014 No \u2014 Your primary competitor lacks direct relevant experience."]},
+ 'TM 2': ['2. Is there an incumbent?',
+   "An incumbent is the company currently performing this work or a direct predecessor contract.\n\n"+
+   "\u2014 Yes, us \u2014 Your company holds the current contract.\n"+
+   "\u2014 Yes, one of the competitors \u2014 A competitor holds the current contract.\n"+
+   "\u2014 No \u2014 This is a new requirement with no current performer, or the previous contract has been completed long enough that incumbency is not a factor."],
+ 'TM 3': ['3. Is the incumbent well-performing?',
+   "This answer is pre-filtered based on your Q2 response. You only need to assess performance for the incumbent identified \u2014 either your own or a competitor's.\n\n"+
+   "\u2014 Performing satisfactorily/unknown \u2014 The incumbent is meeting contract requirements, or you don't have enough information to know otherwise. When in doubt, select this option.\n"+
+   "\u2014 Performance issues \u2014 There is documented or widely known evidence of problems: schedule slips, quality issues, customer complaints, or a cure notice."],
+ 'TM 4': ['4. Will we need a teammate to bid key aspects of the job?',
+   '"Noble work" refers to the core, highest-value technical work the customer is actually buying \u2014 not administrative or support tasks. The question is whether your company will perform that core work itself or hand it to a subcontractor.\n\n'+
+   "\u2014 Yes, outsource most \u2014 A subcontractor will perform the majority of the actual technical work. This significantly weakens your competitive position.\n"+
+   "\u2014 Yes, outsource some \u2014 You will perform the core work but need a teammate for meaningful portions of it.\n"+
+   "\u2014 No \u2014 Your company will perform all or nearly all of the key technical work directly."],
+ 'TM 5': ['5. Do we plan to invest to increase competitiveness prior to RFP release?',
+   "This covers any planned spending beyond B&P \u2014 for example, hiring key personnel, funding IR&D, purchasing equipment, or making product enhancements specifically to strengthen this pursuit. The dollar ranges shown (Low/Moderate/High) are calculated as a percentage of the planned award value for this pursuit.\n\n"+
+   "\u2014 No \u2014 No additional investment planned beyond standard B&P.\n"+
+   "\u2014 Low / Moderate / High \u2014 Select the range that best matches your planned investment."],
+ 'PP 1': ['Past Performance: Do we have performance issues on similar contracts within the last 3 years?',
+   '"Similar" means contracts of the same type and scope \u2014 same pursuit type, same customer agency, or same technical domain. You do not need a perfect match.\n\n'+
+   "\u2014 Yes \u2014 Your company has had documented performance problems on a comparable contract in the last 3 years: cure notices, terminations, significant schedule or cost overruns, or a poor CPARS rating.\n"+
+   "\u2014 No \u2014 No significant performance issues on comparable work in the last 3 years. If you are unsure, select No."],
+ 'P 1': ['Price: How far above/below a normal bid are we planning?',
+   '"Normal bid" means your standard pricing for this type of work with your typical fee. Adjustments above normal mean you are pricing higher than usual \u2014 either because demand allows it or you want higher margin. Adjustments below normal mean you are pricing aggressively to increase your chances of winning.\n\n'+
+   "Select the option that best reflects your current pricing intent. This can be updated after Black Hat or PTW is complete."],
+ 'P 2': ['Price: Is this Best Value or LPTA?',
+   "This is the source selection method the customer will use to evaluate proposals.\n\n"+
+   "\u2014 Best Value \u2014 The customer weighs both technical merit and price. A higher-priced bid can win if the technical solution is strong enough.\n"+
+   "\u2014 LPTA (Lowest Price Technically Acceptable) \u2014 Once a bid meets the minimum technical threshold, the lowest price wins. Technical superiority beyond the minimum does not help you.\n\n"+
+   "If you are unsure, check the draft RFP or Sources Sought. Default to Best Value if the evaluation method has not been announced."],
+ 'Bidders': ['Other: How many competitors are we expecting?',
+   "Enter the number of other companies you expect to submit a proposal, not including your own company. If you are unsure, use your best estimate based on industry knowledge and any RFI responses. This number directly affects the Pwin calculation \u2014 more competitors lowers your baseline probability."],
+};
+
+window.showHelp = function(code, type){
+  let e = HELP[code];
+  if(!e) return;
+  if(!Array.isArray(e)) e = e[isProd(type) ? 'PRODUCT' : 'SERVICES'];
+  const box = document.createElement('div');
+  box.className = 'helpbox';
+  box.innerHTML = `<div class="inner"><h4>${e[0]}</h4>
+    <div class="body2">${e[1].replace(/</g,'&lt;')}</div>
+    <div class="ft"><button class="btn" id="helpClose">Close</button></div></div>`;
+  document.body.appendChild(box);
+  const close=()=>box.remove();
+  box.querySelector('#helpClose').onclick=close;
+  box.onclick=ev=>{ if(ev.target===box) close(); };
+};
+
+/* ---------- inline editing ----------
+   Every field goes through the same save path so validation, conflict
+   handling and the audit trail behave identically wherever a value is
+   changed. Fields the engine or staffing model derives are rendered
+   read-only WITH THE REASON -- a greyed-out box with no explanation reads
+   as broken rather than as intentional. */
+const UI_TO_API = {name:'name', opp_id:'external_opportunity_id',
+  market:'market_code', type:'opportunity_type_code',
+  contract:'contract_type_code', stage:'pipeline_stage_code',
+  sole:'is_sole_source', bidders:'bidders',
+  value:'planned_total_award_value', due:'proposal_due_date',
+  award:'contract_award_date', end:'period_end_date'};
+
+const isAdmin = ()=> !!(D.user && (D.user.roles||[]).includes('admin'));
+
+let REF = null;                 // dropdown source data, loaded once
+let editBuf = {};               // pending edits for the open pursuit
+let editUid = null;
+
+async function loadReference(){
+  if(REF) return REF;
+  const r = await fetch('/api/reference', {credentials:'same-origin'});
+  if(!r.ok) throw new Error('reference data unavailable');
+  REF = await r.json();
+  return REF;
+}
+
+/* Keyed by the UI field name, which is what fieldRow() is given. Keying
+   this by API name was a real bug: nothing matched, so every derived field
+   rendered as an editable input. */
+const DERIVED_WHY = {
+  fee: 'Nominal rate for the contract type, adjusted by the price '
+    + 'aggressiveness chosen at Black Hat. Set on the Black Hat or PTW form.',
+  inv: 'Investment amount, entered on the Black Hat or PTW form.',
+  bp_start: 'Calculated by the staffing model, working backward from the '
+    + 'proposal due date across the phase durations.',
+  pwin: 'Computed by the engine. Change the questionnaire answers to move it.',
+};
+
+function fieldRow(r, key, label, opts){
+  opts = opts || {};
+  const val = r[key];
+  const why = DERIVED_WHY[key];
+  if(why){
+    return `<div class="fr derived"><label>${label}</label>
+      <div class="fv">${opts.fmt ? opts.fmt(val) : (val ?? '\u2014')}
+        <span class="lockwhy" title="${why}">derived</span></div></div>`;
+  }
+  // editBuf is keyed by API field name; the row knows its UI name. One map,
+  // consulted in both directions, so a rename cannot desynchronise them.
+  const apiKey = UI_TO_API[key];
+  const dirty = apiKey && Object.prototype.hasOwnProperty.call(editBuf, apiKey);
+  const shown = dirty ? editBuf[apiKey] : val;
+  let input;
+  if(opts.type === 'select'){
+    input = `<select data-ed="${key}">
+      ${opts.blank ? `<option value="">\u2014</option>` : ''}
+      ${(opts.options||[]).map(o=>
+        `<option value="${o.code}" ${String(shown)===String(o.code)?'selected':''}
+          >${o.label}</option>`).join('')}</select>`;
+  } else if(opts.type === 'bool'){
+    input = `<label class="tg"><input type="checkbox" data-ed="${key}"
+      ${shown?'checked':''}><span></span></label>`;
+  } else {
+    const raw = `<input data-ed="${key}" type="${opts.type||'text'}"
+      ${opts.step?`step="${opts.step}"`:''} ${opts.min!=null?`min="${opts.min}"`:''}
+      ${opts.max!=null?`max="${opts.max}"`:''}
+      value="${shown==null?'':String(shown).replace(/"/g,'&quot;')}">`;
+    // A currency or percentage box should say so. Cheaper and less
+    // error-prone than formatting the value itself, which fights the
+    // number input on every keystroke.
+    input = opts.sym
+      ? `<span class="adorn ${opts.sym==='%'?'pct':''}" data-sym="${opts.sym}">${raw}</span>`
+      : raw;
+  }
+  return `<div class="fr edit${dirty?' dirty':''}"><label>${label}</label>
+    <div class="fv">${input}${opts.note?`<span class="fnote${opts.warnNote?' warn':''}">${opts.note}</span>`:''}</div></div>`;
+}
+
+function editBar(){
+  const n = Object.keys(editBuf).length;
+  if(!n) return '';
+  return `<div class="editbar"><b>${n}</b> unsaved change${n>1?'s':''}
+    <span><button class="btn" id="edSave">Save</button>
+    <button class="btn gh" id="edCancel">Discard</button></span></div>`;
+}
+
+async function saveEdits(uid){
+  const r = P.find(x=>x.uid===uid);
+  if(!r || !Object.keys(editBuf).length) return;
+  const payload = {expected_updated_at: r.updated_at, ...editBuf};
+  try{
+    const res = await fetch(`/api/pursuits/${r.id}`, {
+      method:'PATCH', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)});
+    if(res.status===401){ showLogin(); return; }
+    const body = await res.json().catch(()=>({}));
+    if(res.status===409){
+      const d = body.detail || {};
+      if(d.error==='modified'){
+        toast(`${d.message} Changed by ${d.changed_by||'someone else'}. `
+              + `Reload to see their version.`, true);
+        return;
+      }
+      toast(typeof d==='string'?d:(d.message||'Conflict'), true);
+      return;
+    }
+    if(!res.ok){
+      const msg = typeof body.detail==='string' ? body.detail
+                : (body.detail && body.detail[0] && body.detail[0].msg)
+                  || `save failed (${res.status})`;
+      toast(msg, true); return;
+    }
+    editBuf = {}; editUid = null;
+    await loadData();              // re-read so derived values refresh too
+    detailView(uid);
+    // Sole source was turned off but the stored Pwin is still the 95%
+    // business-rule value -- it no longer describes a competitive
+    // situation and must not be trusted for this pursuit until it is
+    // recalculated. Real popup, not a toast: this is a data-integrity
+    // condition, not routine confirmation, and should require dismissal.
+    if(body.pwin_needs_recalc){
+      alert(`Saved. This pursuit is no longer sole source, but its Pwin `
+        + `(${pwinPct(body.pwin)}) still reflects the sole-source rule, `
+        + `not a competitive assessment.
+
+Answer the Pwin questionnaire `
+        + `and click Recalculate Pwin before relying on this number.`);
+    } else {
+      toast('Saved.');
+    }
+  }catch(e){ toast(`Could not save: ${e.message}`, true); }
+}
+
+async function setOutcome(uid, outcome, alsoBid){
+  const r = P.find(x=>x.uid===uid);
+  const res = await fetch(`/api/pursuits/${r.id}/outcome`, {
+    method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({outcome: outcome||null, also_set_bid: !!alsoBid})});
+  const body = await res.json().catch(()=>({}));
+  if(res.status===409 && body.detail && body.detail.error==='bid_required'){
+    // The rule, surfaced as a choice rather than a refusal.
+    if(confirm(`${body.detail.message}
+
+Mark it as Bid and continue?`)){
+      return setOutcome(uid, outcome, true);
+    }
+    return false;
+  }
+  if(!res.ok){
+    toast(typeof body.detail==='string'?body.detail:'Could not set outcome', true);
+    return false;
+  }
+  await loadData(); detailView(uid);
+  toast(outcome ? `Recorded as ${outcome.toLowerCase()}.` : 'Pursuit reopened.');
+  return true;
+}
+
+/* ---------- change history ----------
+   The API returns RAW field diffs. All presentation happens in formatDiff()
+   -- one function. Switching to plain language later ("changed the bid
+   decision to No bid") means replacing this function and adding a label
+   map, not touching every call site. That is the only reason raw is a
+   cheap choice now. */
+const FIELD_LABEL = {
+  bid_decision:'Bid decision', name:'Opportunity name', bidders:'Expected bidders',
+  external_opportunity_id:'Opportunity ID', outcome_date:'Outcome date',
+  depends_on_pursuit_id:'Depends on', org_node_id:'Business unit',
+  opportunity_type_id:'Opportunity type', contract_type_id:'Contract type',
+  market_id:'Market', pipeline_stage_id:'Competitive analysis phase',
+  updated_by:'Last edited by', period_end_date:'Contract end date',
+  is_sole_source:'Sole source', planned_total_award_value:'Award value',
+  planned_fee_rate:'Fee rate', planned_investment:'Investment',
+  bp_start_date:'B&P start', proposal_due_date:'Proposal due',
+  contract_award_date:'Contract award', period_end_date:'Period end',
+  outcome:'Outcome', is_active:'Active', updated_at:'Last updated',
+  pwin:'Pwin', market_id:'Market', pipeline_stage_id:'Phase'};
+const HIDE_FIELDS = new Set(['updated_at','updated_by','created_at','created_by']);
+
+// Identifiers are not quantities. "1146" is an opportunity ID, not 1,146.
+const ID_FIELDS = new Set(['external_opportunity_id','depends_on_pursuit_id']);
+function fmtVal(v, field){
+  if(v===null||v===undefined) return '<i>empty</i>';
+  if(typeof v==='boolean') return v?'Yes':'No';
+  const s=String(v);
+  if(ID_FIELDS.has(field)) return s;
+  if(typeof v==='number') return v.toLocaleString('en-US');
+  if(/^\d{4}-\d{2}-\d{2}T/.test(s)) return s.slice(0,16).replace('T',' ');
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if(/^-?\d+(\.\d+)?$/.test(s)) return (+s).toLocaleString('en-US');
+  return s;
+}
+function formatDiff(changed){
+  if(!changed) return '<span style="color:#888">no detail</span>';
+  if(changed.new)     return '<span class="chg up2">created</span>';
+  if(changed.deleted) return '<span class="chg dn2">deleted</span>';
+  const rows = Object.keys(changed)
+    .filter(k=>!HIDE_FIELDS.has(k))
+    .map(k=>`<div class="dif"><b>${FIELD_LABEL[k]||k}</b>
+       <span class="was">${fmtVal(changed[k].from, k)}</span>
+       <span class="arr">&rarr;</span>
+       <span class="now">${fmtVal(changed[k].to, k)}</span></div>`);
+  return rows.length ? rows.join('')
+    : '<span style="color:#888">timestamp only</span>';
+}
+function ago(iso){
+  if(!iso) return '';
+  const d = (Date.now() - new Date(iso).getTime())/1000;
+  if(d < 60) return 'just now';
+  if(d < 3600) return Math.round(d/60)+' min ago';
+  if(d < 86400) return Math.round(d/3600)+' hr ago';
+  return Math.round(d/86400)+' days ago';
+}
+
+/* ---------- presence ----------
+   Advisory. It never blocks a write -- the 409 on save does that. */
+let presenceTimer = null, presenceFor = null;
+async function presenceStart(pursuitId){
+  presenceStop();
+  presenceFor = pursuitId;
+  const beat = async ()=>{
+    if(presenceFor !== pursuitId) return;
+    try{
+      const r = await fetch(`/api/pursuits/${pursuitId}/presence`,
+        {method:'POST', credentials:'same-origin'});
+      if(!r.ok) return;
+      const {others} = await r.json();
+      const el = document.getElementById('presence');
+      if(!el) return;
+      if(others && others.length){
+        el.className = 'presence show';
+        el.innerHTML = others.map(o=>
+          `<b>${o.display_name||o.email}</b> also has this open
+           (since ${ago(o.opened_at)})`).join(' &middot; ') +
+          ` &mdash; your changes will be checked against theirs when you save.`;
+      } else { el.className='presence'; el.innerHTML=''; }
+    }catch(e){ /* presence is advisory; a failure must not disrupt anything */ }
+  };
+  beat();
+  presenceTimer = setInterval(beat, 45000);
+}
+function presenceStop(){
+  if(presenceTimer){ clearInterval(presenceTimer); presenceTimer=null; }
+  if(presenceFor){
+    // Best effort. If it does not land, the row expires on its own.
+    fetch(`/api/pursuits/${presenceFor}/presence`,
+      {method:'DELETE', credentials:'same-origin'}).catch(()=>{});
+    presenceFor = null;
+  }
+}
+
+async function loadHistory(pursuitId){
+  const el = document.getElementById('histBody');
+  if(!el) return;
+  el.innerHTML = '<div class="note">Loading\u2026</div>';
+  try{
+    const r = await fetch(`/api/pursuits/${pursuitId}/history`,
+      {credentials:'same-origin'});
+    if(!r.ok) throw new Error('history unavailable');
+    const rows = await r.json();
+    if(!rows.length){ el.innerHTML =
+      '<div class="note">No recorded changes since this pursuit was imported.</div>';
+      return; }
+    el.innerHTML = `<div class="tw"><table><thead><tr>
+        <th style="width:150px">When</th><th style="width:170px">Who</th>
+        <th>Change</th></tr></thead><tbody>` +
+      rows.map(h=>`<tr>
+        <td class="num" title="${h.occurred_at}">${ago(h.occurred_at)}</td>
+        <td>${h.actor_name || h.actor || '<i>system</i>'}</td>
+        <td>${formatDiff(h.changed_fields)}</td></tr>`).join('') +
+      `</tbody></table></div>`;
+  }catch(e){
+    el.innerHTML = `<div class="note">Could not load history: ${e.message}</div>`;
+  }
+}
+
+/* ---------- writes ---------- */
+/* Optimistic with revert. The toggle must feel instant, but a failed write
+   must not leave the screen showing something the database does not. */
+function toast(msg, bad){
+  let t = document.getElementById('toast');
+  if(!t){ t=document.createElement('div'); t.id='toast'; document.body.appendChild(t); }
+  t.textContent = msg;
+  t.className = bad ? 'bad show' : 'show';
+  clearTimeout(t._h);
+  t._h = setTimeout(()=>{ t.className=''; }, bad ? 6000 : 2500);
+}
+
+async function saveBid(uid, wantBid){
+  const pursuit = P.find(x=>x.uid===uid);
+  if(!pursuit) return false;
+  const prev = BID[uid];
+  BID[uid] = wantBid;                    // optimistic
+  render(); show(cur);
+  try{
+    const r = await fetch(`/api/pursuits/${pursuit.id}/bid`, {
+      method:'PATCH', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({bid: wantBid})});
+    if(r.status===401){ showLogin(); return false; }
+    if(!r.ok){
+      const body = await r.json().catch(()=>({}));
+      throw new Error(body.detail || `save failed (${r.status})`);
+    }
+    pursuit.bid = wantBid ? 'Bid' : 'No Bid';
+    toast(`${pursuit.name}: ${wantBid?'Bid':'No bid'}`);
+    return true;
+  }catch(e){
+    BID[uid] = prev;                     // revert
+    render(); show(cur);
+    toast(`Could not save: ${e.message}`, true);
+    return false;
+  }
+}
+
+/* ---------- data loading ---------- */
+function rebuildDerived(){
+  PY = D.planning_year || PY;
+  YRS = [0,1,2,3,4].map(i=>PY+i);
+  P = D.pursuits || [];
+  OPEN = P.filter(x=>!x.outcome);
+  DECIDED = P.filter(x=>x.outcome);
+
+  // uid MUST be set before anything keys off it. The API has no internal
+  // surrogate in its payload -- the user-facing opportunity id is the key.
+  P.forEach(x=>{x.uid = x.opp_id;});
+
+  Object.keys(BID).forEach(k=>delete BID[k]);
+  P.forEach(x=>{BID[x.uid] = x.bid!=='No Bid';});
+
+  Object.keys(BY_UID).forEach(k=>delete BY_UID[k]);
+  Object.keys(DEPS_OF).forEach(k=>delete DEPS_OF[k]);
+  Object.keys(DEPENDENTS).forEach(k=>delete DEPENDENTS[k]);
+  Object.keys(DEP_NAME).forEach(k=>delete DEP_NAME[k]);
+  // The API keys dependencies by opportunity id, which is what the user sees.
+  P.forEach(x=>{BY_UID[x.opp_id]=x;});
+  P.forEach(x=>{
+    if(x.dep){
+      DEPS_OF[x.opp_id]=x.dep;
+      (DEPENDENTS[x.dep]=DEPENDENTS[x.dep]||[]).push(x.opp_id);
+      if(x.dep_name) DEP_NAME[x.dep]=x.dep_name;
+    }});
+  Object.keys(TG).forEach(k=>delete TG[k]);
+  (D.targets||[]).forEach(t=>{TG[t.year]={
+    year:t.year, esc:+t.esc||0,
+    rev_target:+t.rev_target||0, fee_target:+t.fee_target||0,
+    bp_budget:+t.bp_budget||0, inv_budget:+t.inv_budget||0,
+    other_rev:+t.other_rev||0, other_fee:+t.other_fee||0};});
+  YRS.forEach(y=>{ if(!TG[y]) TG[y]={year:y,rev_target:0,fee_target:0,
+    bp_budget:0,inv_budget:0,esc:0,other_rev:0,other_fee:0}; });
+
+  SB = null;   // sandbox is a copy of the portfolio; rebuild it
+}
+
+function numify(x){
+  // psycopg returns NUMERIC as strings to preserve precision. The views do
+  // arithmetic, so coerce once here rather than at every call site.
+  ['value','fee','pwin','base_pwin','blended_pwin','invpct','inv','bp','prob']
+    .forEach(k=>{ if(x[k]!=null) x[k]=+x[k]; });
+  (x.years||[]).forEach(y=>['rev','fee','bp','inv'].forEach(k=>y[k]=+y[k]||0));
+  return x;
+}
+
+async function loadData(){
+  const r = await fetch('/api/bootstrap', {credentials:'same-origin'});
+  if(r.status===401){ showLogin(); return false; }
+  if(!r.ok) throw new Error('bootstrap failed: '+r.status);
+  const data = await r.json();
+  data.pursuits = (data.pursuits||[]).map(numify);
+  D = data;
+  // A new payload means every selection, filter and buffer from the previous
+  // one is stale -- and if the tenant changed, actively wrong.
+  selUid = null; detailMode = false; editBuf = {}; editUid = null;
+  sbSel = null; page = 1;
+  rebuildDerived();
+  const ft = document.querySelector('.side-ft');
+  if(ft){
+    ft.innerHTML = `${(D.client&&D.client.name)||''}` +
+      `<span id="pyLbl">Planning year ${PY}</span>` +
+      `<span style="color:#6E6E6E">${D.user?D.user.email:''}</span>` +
+      `<button class="btn gh" id="signOut">Sign out</button>`;
+    $('#signOut').onclick = async ()=>{
+      await fetch('/api/logout',{method:'POST',credentials:'same-origin'});
+      // Drop everything in memory. A stale portfolio must not survive a
+      // sign-out -- the next user may be a different tenant entirely.
+      D = {pursuits:[],targets:[],staffing:{months:[],cats:[],demand:{},total:[]},
+           planning_year:PY};
+      rebuildDerived();
+      presenceStop();
+      SB = null; sbSel = null; selUid = null; detailMode = false; page = 1;
+      editBuf = {}; editUid = null; REF = null;
+      sortKey = 'value'; sortDir = -1;
+      FLT = {market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:''};
+      cur = 'dash';          // a new session starts at the dashboard
+      showLogin();
+    };
+  }
+  return true;
+}
+
+function showLogin(){
+  document.querySelector('.app').style.display='none';
+  let el = document.getElementById('loginScreen');
+  if(!el){
+    el = document.createElement('div');
+    el.id='loginScreen';
+    el.innerHTML = `<div class="loginbox">
+      <h1>CDA</h1><span>Pipeline Decision Engine</span>
+      <label>Email</label>
+      <input id="loginEmail" type="text" placeholder="you@company.com"
+             autocomplete="username">
+      <button class="btn" id="loginGo">Sign in</button>
+      <div class="err" id="loginErr"></div>
+      <div class="hint">Local development sign-in. Production federates to
+        your organisation's identity provider.</div></div>`;
+    document.body.appendChild(el);
+    const go = async ()=>{
+      const email = document.getElementById('loginEmail').value.trim();
+      const err = document.getElementById('loginErr');
+      err.textContent='';
+      if(!email){ err.textContent='Enter an email address.'; return; }
+      const res = await fetch('/api/login', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({email})});
+      if(!res.ok){ err.textContent='Sign-in failed. Check the address.'; return; }
+      el.remove();
+      document.querySelector('.app').style.display='';
+      await start();
+    };
+    document.getElementById('loginGo').onclick = go;
+    document.getElementById('loginEmail').addEventListener('keydown',
+      e=>{ if(e.key==='Enter') go(); });
+  }
+  document.getElementById('loginEmail').focus();
+}
+
+/* The view containers are created once. An error must never replace .body
+   wholesale -- doing so deletes #dash, #pursuits and the rest, and the next
+   successful load has nowhere to render. That turned one bad login into a
+   page that stayed broken until a full browser reload. */
+const BODY_TEMPLATE = document.querySelector('.body').innerHTML;
+
+function restoreViewContainers(){
+  const body = document.querySelector('.body');
+  if(!document.getElementById('dash')) body.innerHTML = BODY_TEMPLATE;
+}
+
+function showLoadError(msg){
+  restoreViewContainers();
+  const el = document.getElementById('dash');
+  const html = `<div class="card"><h3>Could not load the portfolio</h3>
+     <div class="note">${msg}</div></div>`;
+  if(el){ el.innerHTML = html; show('dash'); }
+  else { document.querySelector('.body').innerHTML = html; }
+}
+
+async function start(){
+  restoreViewContainers();
+  try{
+    if(await loadData()){
+      render();
+      show('dash');        // land on the dashboard, not wherever we were
+    }
+  }catch(e){
+    console.error(e);
+    showLoadError(`${e.message}<br><br>If this just started happening after an update, try a hard refresh (Ctrl+Shift+R) \u2014 the browser may be showing a cached copy of the page.`);
+  }
+}
+start();
+</script></body></html>
