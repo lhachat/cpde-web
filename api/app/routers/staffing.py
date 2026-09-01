@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
+from ..staffing_escalation import apply_escalation_to_fte
 
 router = APIRouter(prefix="/api/staffing", tags=["staffing"])
 
@@ -97,6 +98,8 @@ def apply_cutoff(phase_dates: dict[str, tuple[date, date]],
 
 def monthly_contributions(fte_by_phase: dict[str, float],
                           phase_dates: dict[str, tuple[date, date]],
+                          is_static: bool = False,
+                          client_rates: dict[int, float] | None = None,
                           ) -> dict[str, float]:
     """Pro-rate FTE across calendar months by exact day overlap.
 
@@ -104,12 +107,11 @@ def monthly_contributions(fte_by_phase: dict[str, float],
 
     A collapsed phase (zero days) contributes nothing.
 
-    NOT IMPLEMENTED HERE: escalation. The engine divides variable-category
-    FTE by a cumulative escalation factor, on the basis that the same B&P
-    budget buys fewer hours as labour costs rise. Static categories are
-    exempt. Replicating that needs labor_category.is_static and the
-    escalation table, neither of which is in this schema yet -- so these
-    figures are UN-ESCALATED and will read slightly low in later years.
+    Escalation (ported from cda_engine's staffing_escalation.py) is
+    applied per month AFTER pro-rating, using that month's calendar
+    year -- a phase spanning a year boundary gets the correct factor on
+    each side. is_static categories are exempt: their own cost basis
+    does not inflate the same way variable categories' does.
     """
     out: dict[str, float] = defaultdict(float)
     for phase, fte in fte_by_phase.items():
@@ -131,7 +133,19 @@ def monthly_contributions(fte_by_phase: dict[str, float],
             m += 1
             if m == 13:
                 y, m = y + 1, 1
-    return out
+    if is_static:
+        return dict(out)
+    return {mk: apply_escalation_to_fte(v, int(mk[:4]), client_rates)
+            for mk, v in out.items()}
+
+
+def client_escalation_rates(cur) -> dict[int, float]:
+    """This tenant's per-year overrides of GENERIC_ESCALATION_RATES.
+    RLS already scopes client_escalation_rate to the current tenant, same
+    as every other tenant-scoped table -- no explicit client_id filter
+    needed here."""
+    rows = fetch_all(cur, "SELECT calendar_year, rate FROM client_escalation_rate")
+    return {r["calendar_year"]: float(r["rate"]) for r in rows}
 
 def _pursuit_filter(open_only: bool) -> str:
     """Cancelled work never counts. Closed work counts unless excluded."""
@@ -195,7 +209,7 @@ async def demand(
             SELECT p.id AS pursuit_id, p.proposal_due_date, p.cancel_date,
                    ph.code AS phase, ph.sequence_no,
                    lc.code AS category, lc.label AS category_label,
-                   lc.display_order, s.fte, d.weeks
+                   lc.display_order, lc.is_static, s.fte, d.weeks
               FROM pursuit_staffing s
               JOIN pursuit p ON p.id = s.pursuit_id
               JOIN phase ph ON ph.id = s.phase_id
@@ -205,6 +219,7 @@ async def demand(
              WHERE {SCOPED} AND {_pursuit_filter(open_only)}
                AND s.fte > 0 AND p.proposal_due_date IS NOT NULL
              ORDER BY p.id, ph.sequence_no, lc.display_order""", (p.user_id,))
+        rates = client_escalation_rates(cur)
 
     # Regroup per pursuit: phase durations plus FTE per category per phase.
     per_pursuit: dict = defaultdict(lambda: {"due": None, "cancel": None,
@@ -212,6 +227,7 @@ async def demand(
                                              "fte": defaultdict(dict)})
     cat_labels: dict[str, str] = {}
     cat_order: dict[str, int] = {}
+    cat_static: dict[str, bool] = {}
     for r in rows:
         rec = per_pursuit[r["pursuit_id"]]
         rec["due"] = r["proposal_due_date"]
@@ -220,6 +236,7 @@ async def demand(
         rec["fte"][r["category"]][r["phase"]] = float(r["fte"])
         cat_labels[r["category"]] = r["category_label"]
         cat_order[r["category"]] = r["display_order"]
+        cat_static[r["category"]] = r["is_static"]
 
     monthly: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     skipped = 0
@@ -230,7 +247,10 @@ async def demand(
         dates = apply_cutoff(compute_phase_dates(rec["due"], rec["weeks"]),
                              rec["cancel"])
         for cat, by_phase in rec["fte"].items():
-            for month, fte in monthly_contributions(by_phase, dates).items():
+            contributions = monthly_contributions(
+                by_phase, dates, is_static=cat_static.get(cat, False),
+                client_rates=rates)
+            for month, fte in contributions.items():
                 monthly[month][cat] += fte
 
     months = sorted(monthly)
@@ -261,8 +281,10 @@ async def demand(
         "phasing": "Phases stack backward from proposal_due_date "
                    "(Final -> PreProp -> Solutioning -> Strategy); EN runs "
                    "forward. Pro-rated by calendar-day overlap. Matches "
-                   "staffing_phaser.py. ESCALATION NOT APPLIED -- needs "
-                   "labor_category.is_static and the escalation table.",
+                   "staffing_phaser.py. Variable-category FTE is divided by "
+                   "the cumulative escalation factor for the calendar year "
+                   "the work lands in; static categories (CM, Tech Lead, "
+                   "Proposal Mgr, Volume Leads, Pricing Lead) are exempt.",
     }
 
 

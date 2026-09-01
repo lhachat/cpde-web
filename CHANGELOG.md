@@ -9,6 +9,216 @@ it does.
 
 ---
 
+## [0.3.0] — 2026-09-01
+
+Real engine-integrated Pwin recalculation, and full closure of the
+original backlog (3a-3f: engine recalculation, dashboard pie/combo
+charts, no-blank-space grid, change-polling banner, staffing escalation,
+Targets & Budgets). Every item below was verified by actually driving
+it -- Playwright end-to-end where UI was involved, direct API/DB checks
+otherwise -- not just read from a diff. **157 assertions passing across
+five suites**, up from 146 at v0.2.0.
+
+### Added
+
+**Recalculate Pwin — real engine integration**
+- Full `CPwinScoringTables.Lookup()` port (`api/app/scoring.py`),
+  verified two independent ways: against the VBA's own `SmokeTest()`
+  (11/11) and against three real AERO pursuits' stored answers,
+  reproducing their exact stored tech/mgmt/pp/price/cprice -- including
+  the TM5 quirk where its price delta writes onto `client_price` (not
+  `comp_price`) with the sign flipped.
+- Fee computation shared between Black Hat and Recalculate
+  (`api/app/fee.py`) so the two can't drift apart.
+- Engine client (`api/app/engine_client.py`) calling the confirmed real
+  `/v1/run` contract (confirmed by reading `cda_engine/runtime/api.py`
+  and `pwin_engine.py` directly, not assumed from the VBA). Local dev
+  targets a local engine instance via `CPDE_ENGINE_URL`; real per-client
+  SSM/IAM key resolution is explicitly NOT built yet (flagged in that
+  module's own docstring as follow-up work, not silently skipped).
+- Synthetic competitor construction confirmed from `BuildInputJson_` and
+  ported exactly: bidder count -> N "Avg Co" entries, fixed 85/85/85
+  scores, `bid_probability: 1.0`. Not real competitor identity or
+  scores -- `ddl/01_schema.sql` NOTE-3 already established that's out of
+  scope client-side by decision.
+- Sandbox preview mode (`persist=False`) kept architecturally separate
+  from the real pursuit path -- the sandbox's hypothetical, unsaved
+  answer edits needed a fundamentally different call than a real
+  recalculation, not a shared code path with a flag bolted on.
+- Guard against silently regressing a Post-BH/PTW pursuit's
+  `assessment_type` back to `QUESTIONNAIRE` on recalculation -- would
+  otherwise overwrite a higher-precision analyst-entered assessment with
+  a lower-precision engine one.
+- **Correction to an earlier design assumption in this project, stated
+  plainly so it isn't reintroduced**: the actual IP boundary is the
+  tournament solve inside `/v1/run`, NOT the per-answer scoring deltas
+  or the fee computation. Both of the latter are already computed
+  client-side in the production Excel tool and displayed openly. An
+  earlier assumption in this project drew that boundary too broadly;
+  `scoring.py` and `fee.py` are correct as built, computing both
+  server-side in this app rather than round-tripping through the engine
+  for values that were never protected.
+
+**Sole source**
+- Fixed: `12_sole_source_pwin.sql` had been written but never actually
+  applied to the running database -- every "turn sole source on" write
+  had been silently failing. Applied it, and added a permanent
+  regression test (`test_sole_source_migration_applied` in
+  `test_integrity.py`) specifically so "migration file exists but was
+  never run" cannot recur unnoticed -- that exact class of bug, not just
+  this one instance of it.
+- Confirmed via an isolated throwaway Postgres container (not the live
+  dev database) that a genuinely fresh environment picks up the
+  migration correctly -- this was a live-database timing gap, not a
+  `docker-compose.yml` or init-script ordering bug.
+- Full sole-source on -> off -> real-recalculation cycle verified
+  end-to-end against the live API.
+
+**Dashboard (backlog 3b, 3c)**
+- Pie chart restricted to "By market" and "By competitive analysis
+  phase" only -- every other card's configure dropdown no longer offers
+  it at all, rather than offering it and silently refusing to render.
+- Pie given its own `PIE_COLORS` constant, deliberately not the staffing
+  view's `CCOL` -- `CCOL`'s first entry is near-black, and Pre-BH being
+  the dominant phase in every dataset loaded so far turned that into a
+  giant black wedge filling most of the card. Also fixed: the pie's SVG
+  had no fixed size, so the page's global `svg{width:100%}` rule (meant
+  for the responsive bar/combo charts) stretched a 1:1-aspect pie to the
+  full card width. Both bugs, not just the color one.
+- Combo (bar + overlaid line) chart added, now the DEFAULT for Revenue
+  vs Target, B&P vs Budget, and Investment vs Budget -- a bar-only chart
+  was losing the target line's context.
+- No-blank-space grid pass across the dashboard and B&P views: found and
+  fixed one real instance (`invtable` sitting alone in its own
+  two-column grid row) by moving it to a full-width card, matching the
+  convention already used elsewhere on the page. Audited every other
+  grid on both views; none of them had the problem.
+- Card titles corrected: "By market" -> "Revenue by market", "By
+  competitive analysis phase" -> "Revenue by competitive analysis
+  phase" -- checked that the second title was equally underspecified
+  (same four columns as the first) before applying the same fix, rather
+  than assuming.
+
+**Change-polling banner (backlog 3e)**
+- `GET /api/changes?since=` -- already built, never called from the
+  frontend -- is now polled roughly every 60 seconds. Distinct from the
+  presence system (presence says someone else has THIS pursuit open;
+  this says the PORTFOLIO changed since the page loaded); both run at
+  once without interfering with each other, confirmed via a real
+  two-session test with no mocking.
+- Polling stops when the tab is hidden (`visibilitychange`) and resumes
+  when visible again -- no wasted requests in a background tab.
+- The banner is persistent, not auto-dismissing like the existing
+  `#toast` pattern -- a portfolio change is not a transient
+  confirmation. Dismissing it hides it only until the next poll finds
+  something new; it does not permanently suppress future changes.
+- The `since` cursor advances via the response's `latest` field after
+  every poll (found changes or not), so nothing in the gap between two
+  polls is missed and the same change is never reported twice.
+- Test-interval override (`window.__CPDE_TEST_POLL_MS`) is a bare JS
+  global reachable only by running script before the page's own script
+  executes (Playwright's `addInitScript`, a devtools console) -- never a
+  URL parameter or UI control a real user could trigger by accident.
+
+**Staffing escalation (backlog 3f)**
+- `labor_category.is_static` ported from `cda_engine`'s real
+  `LABOR_CATEGORIES` config, not guessed from category names -- 5
+  static (CM, Tech Lead, Proposal Mgr, Volume Leads, Pricing Lead), 13
+  variable, confirmed against the live schema.
+- Escalation applied inside `monthly_contributions()`, the shared
+  per-month aggregation point both `/api/staffing/demand` and
+  `bootstrap.py`'s own duplicate staffing widget read from -- fixed
+  once, both call sites correct, rather than fixing the one that
+  happened to be tested first.
+- New `client_escalation_rate` table (per-tenant override of the
+  generic rate table for one calendar year, full RLS) -- built after
+  confirming with the user this was in scope for the pass, not assumed.
+  No write endpoint ships with it; setting an override rate today is a
+  manual `INSERT`, the same posture as `set_engine_identity.sql`.
+- Cross-verified two independent ways before wiring anything into
+  `staffing.py`: a hand-computed cumulative escalation factor, and all
+  22 assertions in `cda_engine`'s own `test_staffing_escalation.py` test
+  fixture run against the ported functions -- both agreed exactly.
+- Known before/after for the verification fixture (BDGEN, 2028-01):
+  2.02 unescalated -> 1.86 escalated; all five static categories
+  confirmed byte-for-byte unchanged in the same month.
+
+**Targets & Budgets**
+- Wired to the real `PUT /api/plan-years/{year}` endpoint via the
+  existing edit-buffer/save-bar pattern (a year-keyed `targetBuf`,
+  reusing `editBar()`'s HTML/CSS) instead of a second editing mechanism.
+  Previously this view only ever mutated the in-memory `TG` object --
+  confirmed directly by reading the code, not assumed -- with no save
+  path and no role gating at all.
+- Caught and avoided re-introducing a documented past bug from this
+  exact codebase: re-rendering the whole view on every `change` event
+  destroys the Save button before a blur-triggered click lands. Fixed
+  by updating the buffer and dirty styling in place, matching pursuit-
+  detail editing's established discipline, rather than the naive
+  full-rerender-on-change approach that shipped this bug once already.
+- Dashboard chart propagation confirmed to need no extra invalidation
+  step: `loadData()` already rebuilds `TG` from fresh `D.targets` inside
+  `rebuildDerived()`, and `render()` unconditionally redraws every view.
+  The first version of the verification check for this false-positived
+  by reading `TG` in-memory without a real page reload -- editing
+  mutates the same object the dashboard reads, so it would have passed
+  even with zero persistence. Caught during the RED phase and rewritten
+  to force a genuine reload before checking; the rewritten check showed
+  the dashboard chart's tooltip literally reading the newly-saved target
+  value after reload.
+- Non-admin/executive users see read-only targets with the same
+  "admin only" visual treatment already used for Opportunity ID, not a
+  new pattern.
+
+### Test suite growth
+
+| Suite | Assertions | Result |
+|---|---|---|
+| `test_isolation.py` — tenant isolation (RLS) | 29 | pass |
+| `test_scope.py` — business-unit scope | 12 | pass |
+| `test_integrity.py` — data integrity | 41 | pass (1 warning, non-fatal) |
+| `test_api_security.py` — API-layer security | 69 | pass |
+| `test_staffing_escalation.py` — staffing escalation model | 6 | pass |
+
+The one integrity warning is unchanged from v0.2.0: 20 pursuits migrated
+from the workbook before this schema distinguished assessment types,
+`assessment_type` left as `QUESTIONNAIRE` because it isn't retroactively
+recoverable (`11_assessment_type.sql`'s own documented behavior).
+
+### Known gaps
+
+- **Targets & Budgets does not work for AERO specifically.**
+  `PUT /api/plan-years/{year}` correctly refuses to guess which business
+  unit's plan to edit when a user has more than one license-boundary BU
+  in scope -- and AERO's admin user does (BU and BU2 both visible);
+  DEMO's admin does not, which is why DEMO was used to verify the
+  feature above. There is no UI or API parameter to specify which BU's
+  plan a multi-BU user means. Not introduced this round -- surfaced by
+  this round's testing, on the endpoint exactly as it shipped in v0.2.0.
+  Real AERO users cannot set targets today. This should be picked up
+  next, not left indefinitely -- it blocks a core feature on the more
+  representative of the two loaded tenants.
+- `engine_client.py`'s local-dev API key handling (no SSM/IAM in this
+  sandbox) -- flagged as follow-up work, per that module's own
+  docstring.
+- `client_escalation_rate` has no write endpoint; setting a client
+  override rate is a manual `INSERT` until one is built.
+- `pwin_assessment.blended_pwin` (the dependency-blend math combining a
+  `BASE` and `DEPENDENT_WON` assessment) is still not computed anywhere
+  -- Recalculate Pwin writes `pwin = base_pwin` directly for a
+  non-dependent pursuit and leaves `pwin` NULL (flagging
+  `pwin_needs_recalc`) for a dependent one, rather than inventing the
+  blend formula.
+- Two AERO pursuits reassigned from BMC2A to MSN in the database only;
+  their stored Pwins were computed against BMC2A's differential.
+- `06_plan_year.sql` superseded by `migrate_workbook.py`; delete it.
+- Tests are still not automated on commit.
+- No licensing enforcement.
+- Duplicate-pursuit detection remains unbuilt (see the working brief's
+  backlog).
+
+---
+
 ## [0.2.0] — 2026-08-28
 
 The API layer, a live UI reading from the database instead of embedded

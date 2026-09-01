@@ -233,6 +233,54 @@ def main():
     check("a capture manager cannot read the audit log", r.status_code == 403,
           f"got {r.status_code}")
 
+    # ---- 9b. plan-year writes persist and are audited ------------------
+    # Uses B (DEMO admin), not A (AERO admin): AERO's org tree has two
+    # license-boundary business units (BU, BU2) both visible to the
+    # top-scoped AERO admin, so a bare PUT correctly 409s there as
+    # ambiguous ("specify which plan to edit") -- that is the endpoint
+    # working as designed, not a bug. DEMO has exactly one, so its admin
+    # resolves unambiguously.
+    print("\n=== 9b. plan-year writes persist and are audited ===")
+    test_year = 2099   # implausible enough to never collide with real data
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        n_before = db.execute("SELECT count(*) AS n FROM audit_log").fetchone()["n"]
+    r = safe(B.put, f"/api/plan-years/{test_year}", json={"revenue_target": 12345678})
+    check("admin can PUT a plan-year", r.status_code == 200,
+          f"got {r.status_code}: {r.text[:150]}")
+    r2 = safe(B.get, "/api/plan-years")
+    found = None
+    if r2.status_code == 200:
+        found = next((row for row in r2.json()
+                     if row.get("calendar_year") == test_year), None)
+    check("the written value reads back via GET /api/plan-years",
+          found is not None and float(found.get("revenue_target") or 0) == 12345678,
+          f"got {found}")
+    # The row was just created, so THAT write's audit entry logs the whole
+    # new row under "new" (there is no "before" to diff against) -- correct
+    # trigger behavior, not what we're checking. A second write to the
+    # SAME (now-existing) row is a genuine UPDATE and should show a
+    # proper before/after diff for the changed field.
+    r3 = safe(B.put, f"/api/plan-years/{test_year}", json={"revenue_target": 87654321})
+    check("a second write to the same year succeeds", r3.status_code == 200,
+          f"got {r3.status_code}")
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        n_after = db.execute("SELECT count(*) AS n FROM audit_log").fetchone()["n"]
+        last = db.execute("""
+            SELECT action, changed_fields FROM audit_log
+             WHERE table_name = 'plan_year' ORDER BY occurred_at DESC LIMIT 1
+        """).fetchone()
+    check("the plan-year write was audited", n_after > n_before,
+          f"{n_before} -> {n_after}")
+    check("the update's audit row shows a before/after diff for revenue_target",
+          bool(last and last["action"] == "UPDATE"
+               and (last["changed_fields"] or {}).get("revenue_target", {}).get("from") == 12345678
+               and (last["changed_fields"] or {}).get("revenue_target", {}).get("to") == 87654321),
+          f"recorded {last}")
+    # Clean up -- this test year must never linger and pollute the real plan.
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        db.execute("DELETE FROM plan_year WHERE calendar_year = %s", (test_year,))
+        db.commit()
+
     # ---- 10. the audit trail actually records ------------------------
     print("\n=== 10. writes are audited ===")
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:

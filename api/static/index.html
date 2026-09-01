@@ -270,6 +270,16 @@ tr.nobid td b{text-decoration:line-through}
   box-shadow:0 6px 20px rgba(0,0,0,.28);max-width:70vw}
 #toast.show{bottom:22px;opacity:1}
 #toast.bad{background:var(--bad)}
+/* Persistent, unlike #toast -- the portfolio having changed under the
+   user is not a transient confirmation, it stays until they act. */
+#changeBanner{display:none;position:fixed;top:0;left:0;right:0;z-index:250;
+  background:var(--accent-dk);color:#fff;padding:9px 16px;font-size:12.5px;
+  align-items:center;justify-content:center;gap:14px;text-align:center;
+  box-shadow:0 2px 10px rgba(0,0,0,.18)}
+#changeBanner.show{display:flex}
+#changeBanner button{background:transparent;border:1px solid rgba(255,255,255,.55);
+  color:#fff;padding:3px 11px;border-radius:3px;font-size:11.5px;cursor:pointer}
+#changeBanner button.x{border:none;padding:0 4px;font-size:16px;line-height:1}
 .side-ft #signOut{margin-top:10px;padding:4px 12px;font-size:11.5px;
   background:transparent;color:#BFBFBF;border-color:#2B2B2B}
 .side-ft #signOut:hover{background:#1C1C1C;color:#fff;border-color:#3B3B3B}
@@ -403,6 +413,63 @@ function barsGrouped(series,labels,colors,{h=190,fmt=M,pad=36,w=760}={}){
   g+=`<line class="ax" x1="${pad}" x2="${w}" y1="${h-15}" y2="${h-15}"/>`;
   return `<svg viewBox="0 0 ${w} ${h}">${g}</svg>`;
 }
+/* Bars for every series but the first, an overlaid line+dots for the
+   first -- series[0] is always the target/budget in every call site
+   (revS, bpS, the investment pair), so "the line is the target" holds
+   without needing a separate flag. Same grid/axis/color conventions as
+   barsGrouped -- a bar-only chart loses the target line's context,
+   this is that context added back, not a different visual language. */
+function comboChart(series,labels,colors,{h=190,fmt=M,pad=36,w=760}={}){
+  const lineS=series[0], barS=series.slice(1);
+  const n=labels.length, gw=(w-pad-8)/n, bw=Math.min(24,(gw-16)/Math.max(1,barS.length));
+  const max=Math.max(...series.flatMap(s=>s.v),1);
+  const y=v=>h-15-(v/max)*(h-36);
+  let g='';
+  for(let i=0;i<=4;i++){const gy=h-15-(i/4)*(h-36);
+    g+=`<line class="gl" x1="${pad}" x2="${w}" y1="${gy}" y2="${gy}"/><text class="axl" x="4" y="${gy+3}">${fmt(max*i/4)}</text>`;}
+  const pts=[];
+  labels.forEach((l,i)=>{const x0=pad+6+i*gw;
+    barS.forEach((s,j)=>{
+      const bx=x0+(gw-bw*barS.length-4*(barS.length-1))/2+j*(bw+4), vy=y(s.v[i]);
+      g+=`<rect x="${bx}" y="${vy}" width="${bw}" height="${Math.max(0,h-15-vy)}" fill="${colors[j+1]}" rx="1"><title>${s.name} ${l}: ${fmt(s.v[i])}</title></rect>`;});
+    g+=`<text class="axl" x="${x0+gw/2}" y="${h-2}" text-anchor="middle">${l}</text>`;
+    pts.push([x0+gw/2,y(lineS.v[i])]);});
+  g+=`<path d="${pts.map((p,i)=>(i===0?'M':'L')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ')}"
+        fill="none" stroke="${colors[0]}" stroke-width="2"/>`;
+  pts.forEach((p,i)=>{g+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5"
+    fill="${colors[0]}" stroke="#fff" stroke-width="1"><title>${lineS.name} ${labels[i]}: ${fmt(lineS.v[i])}</title></circle>`;});
+  g+=`<line class="ax" x1="${pad}" x2="${w}" y1="${h-15}" y2="${h-15}"/>`;
+  return `<svg viewBox="0 0 ${w} ${h}">${g}</svg>`;
+}
+/* Own small palette, deliberately NOT the staffing view's CCOL -- CCOL's
+   first entry is near-black and Pre-BH (this app's default phase) being
+   the dominant slice in every dataset loaded so far turned that into a
+   giant black wedge. Greens/ambers already used elsewhere for bar/combo
+   charts (revenue/bp/investment), just never collected into their own
+   constant before. */
+const PIE_COLORS=['#3B6D11','#8A6A17','#4E8A1B','#639F2C','#A6862F','#96C463','#C2A455','#7CB343'];
+/* Whole-to-parts. Only ever called for the two cards where a single
+   year's category breakdown is the shape of the data -- see PIE_CARDS.
+   Fixed pixel size, not viewBox-only: the page's global svg{width:100%}
+   rule (meant for the responsive bar/combo/histogram charts) would
+   otherwise stretch a 1:1-aspect pie to the full card width. */
+function pieChart(rows,{h=150,w=150,valueKey='value'}={}){
+  const total=rows.reduce((s,r)=>s+(r[valueKey]||0),0)||1;
+  const cx=w/2,cy=h/2,rad=Math.min(w,h)/2-8;
+  let ang=-Math.PI/2,g='';
+  rows.forEach((row,i)=>{
+    const frac=(row[valueKey]||0)/total;
+    if(frac<=0) return;
+    const a0=ang,a1=Math.min(ang+frac*2*Math.PI,ang+2*Math.PI-0.0001);
+    const x0=cx+rad*Math.cos(a0),y0=cy+rad*Math.sin(a0);
+    const x1=cx+rad*Math.cos(a1),y1=cy+rad*Math.sin(a1);
+    const large=(a1-a0)>Math.PI?1:0;
+    g+=`<path d="M${cx},${cy} L${x0.toFixed(2)},${y0.toFixed(2)}
+      A${rad},${rad} 0 ${large} 1 ${x1.toFixed(2)},${y1.toFixed(2)} Z"
+      fill="${PIE_COLORS[i%PIE_COLORS.length]}"><title>${row.k}: ${M(row[valueKey])} (${(frac*100).toFixed(1)}%)</title></path>`;
+    ang=a1;});
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:${w}px;height:${h}px;max-width:100%">${g}</svg>`;
+}
 const legend=(n,c)=>'<div class="lg">'+n.map((x,i)=>`<span><i style="background:${c[i]}"></i>${x}</span>`).join('')+'</div>';
 const CCOL=['#0D0D0D','#22350E','#3B6D11','#4E8A1B','#639F2C','#7CB343','#96C463','#AFD289',
  '#C5DCA8','#555555','#6E6E6E','#888888','#A0A0A0','#B8B8B8','#8A6A17','#A6862F','#C2A455','#D8C58A'];
@@ -497,30 +564,44 @@ function tools(v){
 
 
 /* ---------- Dashboard configure ----------
-   Card visibility works. Chart-type switching works where a table equivalent
-   exists. Pie is present to talk to, and refuses politely -- a pie of five
-   years is a worse bar chart, and saying so is more useful than drawing it. */
+   Card visibility works. Chart-type switching works where a table
+   equivalent exists. Pie is a whole-to-parts chart -- it only makes sense
+   where five years of a target-vs-actual comparison are NOT being forced
+   into it, i.e. a single-year breakdown by category. Only 'market' and
+   'phase' are that shape; pie is not offered as an option anywhere else. */
+const PIE_CARDS=new Set(['market','phase']);
+// Target-vs-actual comparisons: a bar-only chart loses the target line's
+// context, so combo (bars + overlaid target line) is the default here,
+// not just an option alongside bar/table.
+const COMBO_CARDS=new Set(['revenue','bp','invchart']);
 const DASH_CFG={
-  revenue:{on:true,type:'bar',label:'Revenue vs. target'},
+  revenue:{on:true,type:'combo',label:'Revenue vs. target'},
   summary:{on:true,type:'list',label:'Portfolio summary'},
   outcomes:{on:true,type:'table',label:'Outcomes by year'},
   pwindist:{on:true,type:'hist',label:'Pwin distribution'},
-  bp:{on:true,type:'bar',label:'B&P required vs. budget'},
-  invchart:{on:true,type:'bar',label:'Investment vs. budget'},
+  bp:{on:true,type:'combo',label:'B&P required vs. budget'},
+  invchart:{on:true,type:'combo',label:'Investment vs. budget'},
   invtable:{on:true,type:'table',label:'Investment by year'},
-  market:{on:true,type:'table',label:'By market'},
-  phase:{on:true,type:'table',label:'By competitive analysis phase'},
+  market:{on:true,type:'table',label:'Revenue by market'},
+  phase:{on:true,type:'table',label:'Revenue by competitive analysis phase'},
 };
 let cfgOpen=false;
 function cfgPanel(){
   if(!cfgOpen) return '';
   const typeOpts=k=>{
     const t=DASH_CFG[k].type;
-    const avail={bar:['bar','table','pie'],table:['table','bar','pie'],
-                 hist:['hist','table'],list:['list']}[t==='pie'?'bar':t]||['bar'];
+    // Options are keyed by the CARD, not by its current type -- a card
+    // never gains or loses an option just because something else is
+    // selected right now.
+    const avail = PIE_CARDS.has(k) ? ['table','bar','pie']
+      : COMBO_CARDS.has(k) ? ['combo','bar','table']
+      : t==='hist' ? ['hist','table']
+      : t==='list' ? ['list']
+      : ['bar','table'];
     return `<select data-cfgt="${k}">${avail.map(o=>
       `<option value="${o}" ${o===t?'selected':''}>${
-        {bar:'Bar chart',table:'Table',pie:'Pie chart',hist:'Histogram',list:'Summary list'}[o]
+        {bar:'Bar chart',table:'Table',pie:'Pie chart',hist:'Histogram',
+         list:'Summary list',combo:'Combo (bar + line)'}[o]
       }</option>`).join('')}</select>`;};
   return `<div class="card" style="border-color:var(--accent)">
    <h3>Configure dashboard <small>per user &middot; saved to their profile</small></h3>
@@ -536,8 +617,9 @@ function cfgPanel(){
        :k==='pwindist'?'Band widths configurable in the built version'
        :'Drag to reorder \u2014 not wired in this prototype'}</td></tr>`).join('')}
    </tbody></table></div>
-   <div class="note"><b>What is real here:</b> show/hide and bar\u2194table switching work.
-     Reordering, pie charts and per-widget filters are not wired \u2014 this panel exists to
+   <div class="note"><b>What is real here:</b> show/hide, bar\u2194table\u2194combo switching, and
+     pie for the two cards it applies to (By market, By competitive analysis phase) all work.
+     Reordering and per-widget filters are not wired \u2014 this panel exists to
      agree the shape of the feature. In the built version this is a per-user preference
      row, not a product setting: the metrics themselves and how they are computed stay
      fixed, because letting a client redefine "probabilistic revenue" would undermine
@@ -557,13 +639,29 @@ function seriesTable(series,labels,fmt){
         <td class="r num" style="color:${d>=0?'#3B6D11':'#8C2F27'}">${d>=0?'+':''}${fmt(d)}</td></tr>`;
     }).join('')}</tbody></table></div>`;
 }
+/* Single-year category breakdown (market or phase) switched between
+   table/bar/pie by DASH_CFG[key].type. Separate from chartOrTable
+   because the data shape is different -- one row per category, not one
+   series per year -- and only these two cards ever reach 'pie'. */
+function catBody(key,rows,tableCatCell){
+  const t=DASH_CFG[key].type;
+  if(t==='pie') return pieChart(rows)+legend(rows.map(r=>r.k),rows.map((_,i)=>PIE_COLORS[i%PIE_COLORS.length]));
+  if(t==='bar') return barsGrouped([{name:'Value',v:rows.map(r=>r.value)}],rows.map(r=>r.k),['#3B6D11'])
+    +legend(['Value'],['#3B6D11']);
+  return `<div class="tw"><table><thead><tr><th>${key==='market'?'Market':'Phase'}</th>
+    <th class="r">Pursuits</th><th class="r">Value</th>
+    <th class="r">Probabilistic</th><th class="r">Avg Pwin</th></tr></thead>
+  <tbody>${rows.map(r=>`<tr><td>${tableCatCell(r.k)}</td><td class="r num">${r.n}</td>
+    <td class="r num">${M(r.value)}</td><td class="r num">${M(r.prob)}</td>
+    <td class="r num">${r.pwin==null?'\u2014':(r.pwin*100).toFixed(1)+'%'}</td></tr>`).join('')}</tbody></table></div>`;
+}
 function chartOrTable(key,series,labels,colors,names){
   const t=DASH_CFG[key].type;
   if(t==='table') return seriesTable(series,labels,M);
-  if(t==='pie') return `<div class="note" style="padding:22px 15px">A pie chart cannot show
-    five years against a target \u2014 there is no whole for the parts to sum to. Left as a bar
-    chart. Pie is available where a single year is split by market or by phase.</div>
-    ${barsGrouped(series,labels,colors)}${legend(names,colors)}`;
+  if(t==='combo') return comboChart(series,labels,colors)+legend(names,colors);
+  // Pie is never offered as an option for a card that reaches this
+  // function (see PIE_CARDS / typeOpts) -- a five-year target-vs-actual
+  // comparison has no whole for parts to sum to. No pie branch needed.
   return barsGrouped(series,labels,colors)+legend(names,colors);
 }
 
@@ -642,7 +740,13 @@ function vDash(){
      ${chartOrTable('invchart',[{name:'Budget',v:YRS.map(y=>TG[y].inv_budget||0)},{name:'Planned',v:byYear().map(r=>r.inv)}],YRS,['#B8B8B8','#3B6D11'],['Investment budget','Planned investment'])}</div>`)}
   </div>
   <div class="grid g2">
-   ${SHOW('invtable',`<div class="card"><h3>Investment by year</h3>
+   ${SHOW('market',`<div class="card"><h3>Revenue by market</h3>
+    ${catBody('market',grp('market',OPEN),k=>k)}</div>
+   <div class="card"><h3>Revenue by competitive analysis phase</h3>
+    ${catBody('phase',grp('stage',OPEN),stagePill)}
+    <div class="note">Pwin precision improves once Black Hat and PTW are complete.</div></div>`)}
+  </div>
+  ${SHOW('invtable',`<div class="card"><h3>Investment by year</h3>
     <div class="tw"><table><thead><tr><th>Year</th><th class="r">Budget</th><th class="r">Planned</th>
       <th class="r">Variance</th><th class="r">Pursuits</th></tr></thead>
     <tbody>${YRS.map((y,i)=>{const g=yearAgg(OPEN,i),t2=TG[y],v=(t2.inv_budget||0)-g.inv;
@@ -652,23 +756,7 @@ function vDash(){
       <td class="r num">${n}</td></tr>`;}).join('')}
     </tbody><tfoot><tr><td>Total</td><td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0))}</td>
       <td class="r num">${money(sum(byYear(),r=>r.inv))}</td>
-      <td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0)-sum(byYear(),r=>r.inv))}</td><td></td></tr></tfoot></table></div></div>`)}
-  </div>
-  <div class="grid g2">
-   ${SHOW('market',`<div class="card"><h3>By market</h3>
-    <div class="tw"><table><thead><tr><th>Market</th><th class="r">Pursuits</th><th class="r">Value</th>
-      <th class="r">Probabilistic</th><th class="r">Avg Pwin</th></tr></thead>
-    <tbody>${grp('market',OPEN).map(r=>`<tr><td>${r.k}</td><td class="r num">${r.n}</td>
-      <td class="r num">${M(r.value)}</td><td class="r num">${M(r.prob)}</td>
-      <td class="r num">${r.pwin==null?'\u2014':(r.pwin*100).toFixed(1)+'%'}</td></tr>`).join('')}</tbody></table></div></div>
-   <div class="card"><h3>By competitive analysis phase</h3>
-    <div class="tw"><table><thead><tr><th>Phase</th><th class="r">Pursuits</th><th class="r">Value</th>
-      <th class="r">Probabilistic</th><th class="r">Avg Pwin</th></tr></thead>
-    <tbody>${grp('stage',OPEN).map(r=>`<tr><td>${stagePill(r.k)}</td><td class="r num">${r.n}</td>
-      <td class="r num">${M(r.value)}</td><td class="r num">${M(r.prob)}</td>
-      <td class="r num">${r.pwin==null?'\u2014':(r.pwin*100).toFixed(1)+'%'}</td></tr>`).join('')}</tbody></table></div>
-    <div class="note">Pwin precision improves once Black Hat and PTW are complete.</div></div>`)}
-  </div>`;
+      <td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0)-sum(byYear(),r=>r.inv))}</td><td></td></tr></tfoot></table></div></div>`)}`;
   $$('#dash [data-cfg]').forEach(c=>c.onchange=e=>{DASH_CFG[e.target.dataset.cfg].on=e.target.checked;vDash();});
   $$('#dash [data-cfgt]').forEach(s=>s.onchange=e=>{DASH_CFG[e.target.dataset.cfgt].type=e.target.value;vDash();});
   const cd=$('#cfgDone'); if(cd) cd.onclick=()=>{cfgOpen=false;vDash();};
@@ -1566,6 +1654,67 @@ function vBP(){
 }
 
 /* ---------- Targets ---------- */
+/* Targets & budgets editing -- a second edit buffer, not editBuf itself,
+   because editBuf is shaped for ONE pursuit's fields and this page edits
+   several years at once (year -> field -> value) -- but same save-bar
+   pattern (editBar()) and dirty-highlighting convention as pursuit
+   detail, not a different mechanism. */
+let targetBuf = {};                 // {year: {uiField: value}}
+const TARGET_UI_TO_API = {
+  esc:'escalation_rate', rev_target:'revenue_target', fee_target:'fee_target',
+  bp_budget:'budgeted_bp', inv_budget:'budgeted_investment',
+};
+function targetDirtyCount(){
+  return Object.values(targetBuf).reduce((n,y)=>n+Object.keys(y).length,0);
+}
+function targetEditBar(){
+  const n = targetDirtyCount();
+  if(!n) return '';
+  return `<div class="editbar"><b>${n}</b> unsaved change${n>1?'s':''}
+    <span><button class="btn" id="tgSave">Save</button>
+    <button class="btn gh" id="tgCancel">Discard</button></span></div>`;
+}
+function refreshTargetBar(){
+  const slot = $('#tgBarSlot');
+  if(!slot) return;
+  const n = targetDirtyCount();
+  slot.innerHTML = n ? targetEditBar() : '';
+  if(n){
+    $('#tgSave').onclick = saveTargets;
+    $('#tgCancel').onclick = ()=>{ targetBuf = {}; vTargets(); };
+  }
+}
+async function saveTargets(){
+  const years = Object.keys(targetBuf);
+  try{
+    for(const y of years){
+      const payload = {};
+      for(const [uiKey,val] of Object.entries(targetBuf[y]))
+        payload[TARGET_UI_TO_API[uiKey]] = val;
+      const res = await fetch(`/api/plan-years/${y}`, {
+        method:'PUT', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)});
+      if(res.status===401){ showLogin(); return; }
+      if(!res.ok){
+        const body = await res.json().catch(()=>({}));
+        const d = body.detail;
+        const msg = typeof d==='string' ? d
+                  : (d && (d.message || (d[0]&&d[0].msg)))
+                    || `save failed for ${y} (${res.status})`;
+        toast(msg, true);
+        return;
+      }
+    }
+    targetBuf = {};
+    // Same load path as everywhere else -- loadData() rebuilds TG from
+    // the fresh D.targets inside rebuildDerived(), and render() redraws
+    // every view including the dashboard's charts, so this closes the
+    // loop without any separate propagation step.
+    if(await loadData()){ render(); show(cur); }
+    toast('Saved.');
+  }catch(e){ toast(`Could not save: ${e.message}`, true); }
+}
 function vTargets(){
   if(!Object.keys(TG).length){
     $('#targets').innerHTML = `<div class="card"><h3>Targets &amp; budgets</h3>
@@ -1573,17 +1722,32 @@ function vTargets(){
       business unit assigned to this account.</p></div></div>`;
     return;
   }
+  const editable = canEditTargets();
+  const val = (y,f) => Object.prototype.hasOwnProperty.call(targetBuf[y]||{}, f)
+    ? targetBuf[y][f] : (TG[y][f] ?? 0);
+  const isDirty = (y,f) => Object.prototype.hasOwnProperty.call(targetBuf[y]||{}, f);
+  const cell = (y,f,step,w) => editable
+    ? `<input class="inp num" type="number" step="${step}"
+        value="${val(y,f)}" data-y="${y}" data-f="${f}"
+        ${w?`style="width:${w}px"`:''}
+        ${isDirty(y,f)?'style="background:var(--accent-tint)"':''}>`
+    : `<span class="num">${f==='esc' ? (TG[y][f]||0) : money(TG[y][f]||0)}</span>`;
   $('#targets').innerHTML=`
-  <div class="flag">Targets and budgets drive every variance shown elsewhere. Edits apply immediately.</div>
+  <div class="flag">Targets and budgets drive every variance shown elsewhere.${
+    editable ? ' Edits require Save.' : ''}</div>
+  <div id="tgBarSlot"></div>
   <div class="card"><h3>Annual operating plan inputs</h3>
+   ${editable ? '' : `<div class="fr derived"><label>Editing</label><div class="fv">
+       <span class="lockwhy" title="Targets are a planning act -- only an administrator or executive can change them.">admin/executive only</span>
+     </div></div>`}
    <div class="tw"><table><thead><tr><th>Year</th><th class="r">Escalation</th><th class="r">Revenue target</th>
      <th class="r">Fee target</th><th class="r">B&amp;P budget</th><th class="r">Investment budget</th></tr></thead>
    <tbody>${YRS.map(y=>`<tr><td class="num">${y}</td>
-     <td class="r"><input class="inp num" type="number" step="0.001" value="${TG[y].esc??0}" data-y="${y}" data-f="esc" style="width:80px"></td>
-     <td class="r"><input class="inp num" type="number" step="100000" value="${TG[y].rev_target||0}" data-y="${y}" data-f="rev_target"></td>
-     <td class="r"><input class="inp num" type="number" step="100000" value="${TG[y].fee_target||0}" data-y="${y}" data-f="fee_target"></td>
-     <td class="r"><input class="inp num" type="number" step="50000" value="${TG[y].bp_budget||0}" data-y="${y}" data-f="bp_budget"></td>
-     <td class="r"><input class="inp num" type="number" step="50000" value="${TG[y].inv_budget||0}" data-y="${y}" data-f="inv_budget"></td></tr>`).join('')}
+     <td class="r">${cell(y,'esc','0.001',80)}</td>
+     <td class="r">${cell(y,'rev_target','100000')}</td>
+     <td class="r">${cell(y,'fee_target','100000')}</td>
+     <td class="r">${cell(y,'bp_budget','50000')}</td>
+     <td class="r">${cell(y,'inv_budget','50000')}</td></tr>`).join('')}
    </tbody><tfoot><tr><td>Total</td><td></td>
      <td class="r num">${money(sum(YRS,y=>TG[y].rev_target||0))}</td>
      <td class="r num">${money(sum(YRS,y=>TG[y].fee_target||0))}</td>
@@ -1591,8 +1755,23 @@ function vTargets(){
      <td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0))}</td></tr></tfoot></table></div>
    <div class="note">In the workbook these live on the Dashboard sheet. Here they are per business unit
      and per planning year, so a division and its parent can hold different plans.</div></div>`;
-  $$('#targets input').forEach(inp=>inp.onchange=e=>{
-    TG[+e.target.dataset.y][e.target.dataset.f]=+e.target.value; render();});
+  refreshTargetBar();
+  // DO NOT re-render the whole view on change -- clicking Save blurs the
+  // input, which fires change, which would rebuild the table and destroy
+  // the Save button before the click lands (this exact bug already
+  // shipped once in pursuit-detail editing). Update the buffer and the
+  // dirty styling in place; only the edit bar slot gets refreshed.
+  if(editable){
+    $$('#targets input[data-f]').forEach(inp=>inp.onchange=e=>{
+      const y=e.target.dataset.y, f=e.target.dataset.f, v=+e.target.value;
+      targetBuf[y] = targetBuf[y] || {};
+      if(v === (TG[y][f] ?? 0)) delete targetBuf[y][f];
+      else targetBuf[y][f] = v;
+      if(!Object.keys(targetBuf[y]).length) delete targetBuf[y];
+      e.target.style.background = isDirty(y,f) ? 'var(--accent-tint)' : '';
+      refreshTargetBar();
+    });
+  }
 }
 
 /* ---------- Sandbox ---------- */
@@ -1977,6 +2156,11 @@ const UI_TO_API = {name:'name', opp_id:'external_opportunity_id',
   award:'contract_award_date', end:'period_end_date'};
 
 const isAdmin = ()=> !!(D.user && (D.user.roles||[]).includes('admin'));
+// Matches PUT /api/plan-years/{year}'s require_role("admin","executive")
+// exactly -- a capture manager should not move the bar their own
+// pipeline is measured against.
+const canEditTargets = ()=> !!(D.user && (D.user.roles||[]).some(
+  r=>r==='admin'||r==='executive'));
 
 let REF = null;                 // dropdown source data, loaded once
 let editBuf = {};               // pending edits for the open pursuit
@@ -2216,6 +2400,84 @@ function presenceStop(){
   }
 }
 
+/* ---------- Portfolio change polling ----------
+   Distinct from presence: presence says someone else has THIS pursuit
+   open right now; this says the PORTFOLIO changed since the page loaded
+   -- unrelated concerns, both run at once.
+
+   __CPDE_TEST_POLL_MS is deliberately a bare JS global, not a URL query
+   param or any UI control -- reachable only by running script before
+   the page's own script executes (Playwright's addInitScript, or a
+   devtools console), never by a link a real user could click or share. */
+let changePollTimer = null;
+let pollingEnabled = false;
+let changesSince = null;
+const changePollIntervalMs = ()=> window.__CPDE_TEST_POLL_MS || 60000;
+
+function startChangePolling(){ pollingEnabled = true; armPollTimer(); }
+function stopChangePolling(){
+  pollingEnabled = false;
+  if(changePollTimer){ clearTimeout(changePollTimer); changePollTimer = null; }
+}
+function armPollTimer(){
+  if(changePollTimer){ clearTimeout(changePollTimer); changePollTimer = null; }
+  if(!pollingEnabled || document.visibilityState==='hidden') return;
+  changePollTimer = setTimeout(pollChangesTick, changePollIntervalMs());
+}
+async function pollChangesTick(){
+  changePollTimer = null;
+  if(!pollingEnabled || document.visibilityState==='hidden') return;
+  try{
+    const res = await fetch(`/api/changes?since=${encodeURIComponent(changesSince)}`,
+      {credentials:'same-origin'});
+    if(res.ok){
+      const body = await res.json();
+      if(body.count>0) showChangeBanner();
+      // Advance the cursor whether or not anything changed -- otherwise
+      // the same window keeps getting re-queried and, worse, a change
+      // landing in the gap between two polls could be missed if the
+      // cursor never moved forward past it.
+      if(body.latest) changesSince = body.latest;
+    }
+  }catch(e){ /* advisory only -- a failed poll must not disrupt anything */ }
+  armPollTimer();
+}
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='hidden'){
+    if(changePollTimer){ clearTimeout(changePollTimer); changePollTimer=null; }
+  } else {
+    armPollTimer();
+  }
+});
+function ensureChangeBanner(){
+  let el = document.getElementById('changeBanner');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'changeBanner';
+    el.innerHTML = `<span>Portfolio updated \u2014 some pursuits changed since this loaded.</span>
+      <button id="changeBannerRefresh" type="button">Refresh</button>
+      <button id="changeBannerClose" type="button" class="x" aria-label="Dismiss">&times;</button>`;
+    document.body.appendChild(el);
+    el.querySelector('#changeBannerRefresh').onclick = async ()=>{
+      hideChangeBanner();
+      if(await loadData()){
+        render(); show(cur);
+        // Re-arm relative to now -- otherwise a poll timer left over from
+        // before the refresh could fire moments later and re-show the
+        // banner for a change the reload just picked up.
+        armPollTimer();
+      }
+    };
+    el.querySelector('#changeBannerClose').onclick = ()=>{ hideChangeBanner(); };
+  }
+  return el;
+}
+function showChangeBanner(){ ensureChangeBanner().classList.add('show'); }
+function hideChangeBanner(){
+  const el = document.getElementById('changeBanner');
+  if(el) el.classList.remove('show');
+}
+
 async function loadHistory(pursuitId){
   const el = document.getElementById('histBody');
   if(!el) return;
@@ -2335,6 +2597,10 @@ async function loadData(){
   const data = await r.json();
   data.pursuits = (data.pursuits||[]).map(numify);
   D = data;
+  // The change-poll cursor resets on every successful load, manual
+  // refreshes included -- whatever is fresh as of THIS load is the new
+  // baseline, so the same change is never reported twice.
+  changesSince = data.latest || new Date().toISOString();
   // A new payload means every selection, filter and buffer from the previous
   // one is stale -- and if the tenant changed, actively wrong.
   selUid = null; detailMode = false; editBuf = {}; editUid = null;
@@ -2354,6 +2620,8 @@ async function loadData(){
            planning_year:PY};
       rebuildDerived();
       presenceStop();
+      stopChangePolling();
+      hideChangeBanner();
       SB = null; sbSel = null; selUid = null; detailMode = false; page = 1;
       editBuf = {}; editUid = null; REF = null;
       sortKey = 'value'; sortDir = -1;
@@ -2428,6 +2696,7 @@ async function start(){
     if(await loadData()){
       render();
       show('dash');        // land on the dashboard, not wherever we were
+      startChangePolling();
     }
   }catch(e){
     console.error(e);

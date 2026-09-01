@@ -21,8 +21,8 @@ from fastapi import APIRouter, Depends
 
 from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
-from .staffing import (_pursuit_filter, apply_cutoff, compute_phase_dates,
-                       monthly_contributions)
+from .staffing import (_pursuit_filter, apply_cutoff, client_escalation_rates,
+                       compute_phase_dates, monthly_contributions)
 
 router = APIRouter(prefix="/api", tags=["bootstrap"])
 
@@ -111,7 +111,8 @@ async def bootstrap(p: Principal = Depends(current_principal)):
         staff_rows = fetch_all(cur, f"""
             SELECT p.id AS pursuit_id, p.proposal_due_date, p.cancel_date,
                    ph.code AS phase, lc.code AS category,
-                   lc.label AS category_label, lc.display_order, s.fte, d.weeks
+                   lc.label AS category_label, lc.display_order, lc.is_static,
+                   s.fte, d.weeks
               FROM pursuit_staffing s
               JOIN pursuit p ON p.id = s.pursuit_id
               JOIN phase ph ON ph.id = s.phase_id
@@ -121,6 +122,7 @@ async def bootstrap(p: Principal = Depends(current_principal)):
              WHERE {SCOPED} AND {_pursuit_filter(False)}
                AND s.fte > 0 AND p.proposal_due_date IS NOT NULL""",
             (p.user_id,))
+        escalation_rates = client_escalation_rates(cur)
 
     # --- attach year projections, and derive total B&P per pursuit ---
     by_pursuit: dict = defaultdict(list)
@@ -188,6 +190,7 @@ async def bootstrap(p: Principal = Depends(current_principal)):
                                      "fte": defaultdict(dict)})
     cat_labels: dict[str, str] = {}
     cat_order: dict[str, int] = {}
+    cat_static: dict[str, bool] = {}
     for r in staff_rows:
         rec = per[r["pursuit_id"]]
         rec["due"] = r["proposal_due_date"]
@@ -196,6 +199,7 @@ async def bootstrap(p: Principal = Depends(current_principal)):
         rec["fte"][r["category"]][r["phase"]] = float(r["fte"])
         cat_labels[r["category"]] = r["category_label"]
         cat_order[r["category"]] = r["display_order"]
+        cat_static[r["category"]] = r["is_static"]
 
     monthly: dict = defaultdict(lambda: defaultdict(float))
     for rec in per.values():
@@ -204,7 +208,10 @@ async def bootstrap(p: Principal = Depends(current_principal)):
         dates = apply_cutoff(compute_phase_dates(rec["due"], rec["weeks"]),
                              rec["cancel"])
         for cat, by_phase in rec["fte"].items():
-            for month, fte in monthly_contributions(by_phase, dates).items():
+            contributions = monthly_contributions(
+                by_phase, dates, is_static=cat_static.get(cat, False),
+                client_rates=escalation_rates)
+            for month, fte in contributions.items():
                 monthly[month][cat] += fte
 
     months = sorted(monthly)

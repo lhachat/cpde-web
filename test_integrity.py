@@ -49,6 +49,21 @@ def check(cur, name, sql, params=(), severity="ERROR", expect_zero=True):
         print(f"  ok    {name}")
 
 
+def test_sole_source_migration_applied(cur):
+    """12_sole_source_pwin.sql must be applied, not just present as a file.
+    This exact gap shipped silently once already this session -- the
+    column didn't exist for an unknown period and every sole-source write
+    failed with no visible error. This test exists specifically so that
+    class of bug cannot recur unnoticed."""
+    cur.execute("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_name = 'pwin_assessment'
+           AND column_name = 'is_sole_source_pwin'""")
+    assert cur.fetchone() is not None, (
+        "is_sole_source_pwin column missing -- 12_sole_source_pwin.sql "
+        "has not been applied to this database")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dsn", required=True)
@@ -57,7 +72,21 @@ def main():
     with psycopg.connect(args.dsn, row_factory=dict_row) as conn:
         cur = conn.cursor()
 
-        print("=== completeness: columns the application joins on ===")
+        print("=== migrations actually applied, not just present in ddl/ ===")
+        # A file existing in ddl/ is not evidence it ran -- Postgres only
+        # executes docker-entrypoint-initdb.d scripts against an empty
+        # data directory. Anything added after first init has to be
+        # applied by hand, and this is the check that would have caught
+        # it not having been.
+        try:
+            test_sole_source_migration_applied(cur)
+            print("  ok    is_sole_source_pwin column exists "
+                  "(12_sole_source_pwin.sql applied)")
+        except AssertionError as e:
+            ERRORS.append(str(e))
+            print(f"  ERROR is_sole_source_pwin column exists: {e}")
+
+        print("\n=== completeness: columns the application joins on ===")
         # This is the bug that prompted the file.
         check(cur, "every year projection is dated", """
             SELECT p.external_opportunity_id, yp.year_offset

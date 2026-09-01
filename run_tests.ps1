@@ -29,6 +29,15 @@ try {
     Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
 }
 
+Write-Host "`n########## STAFFING ESCALATION ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    python test_staffing_escalation.py --base http://localhost:8001 --admin-dsn $ADMIN
+    if ($LASTEXITCODE -ne 0) { $fail = 1 }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
 if ($fail) {
     Write-Host "`nSUITES FAILED" -ForegroundColor Red
 } else {
