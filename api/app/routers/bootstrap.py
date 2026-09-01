@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends
 
 from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
+from ..plan_scope import resolve_license_boundary_nodes
 from .staffing import (_pursuit_filter, apply_cutoff, client_escalation_rates,
                        compute_phase_dates, monthly_contributions)
 
@@ -34,17 +35,27 @@ async def bootstrap(p: Principal = Depends(current_principal)):
     with tenant_tx(p.client_id) as cur:
         client = fetch_one(cur, "SELECT code, name FROM client LIMIT 1")
 
-        plan = fetch_all(cur, """
-            SELECT y.calendar_year AS year, y.escalation_rate AS esc,
-                   y.revenue_target AS rev_target, y.fee_target,
-                   y.budgeted_bp AS bp_budget,
-                   y.budgeted_investment AS inv_budget,
-                   y.current_contract_revenue AS other_rev,
-                   y.current_contract_fee AS other_fee
-              FROM plan_year y
-             WHERE y.org_node_id IN (SELECT org_node_id
-                                       FROM fn_user_visible_org_nodes(%s))
-             ORDER BY y.calendar_year""", (p.user_id,))
+        # Previously this queried every visible org node at once, with no
+        # way to tell which business unit a row belonged to -- silently
+        # correct only by coincidence, for as long as at most one BU
+        # actually had data. A multi-BU user (AERO's admin) gets no
+        # targets embedded here at all, plus the real candidate list, so
+        # the Targets & Budgets view can show a picker rather than
+        # present merged/arbitrary numbers as if they were real.
+        plan_org_nodes = resolve_license_boundary_nodes(cur, p.user_id)
+        plan_node_id = plan_org_nodes[0]["id"] if len(plan_org_nodes) == 1 else None
+        plan = []
+        if plan_node_id:
+            plan = fetch_all(cur, """
+                SELECT y.calendar_year AS year, y.escalation_rate AS esc,
+                       y.revenue_target AS rev_target, y.fee_target,
+                       y.budgeted_bp AS bp_budget,
+                       y.budgeted_investment AS inv_budget,
+                       y.current_contract_revenue AS other_rev,
+                       y.current_contract_fee AS other_fee
+                  FROM plan_year y
+                 WHERE y.org_node_id = %s
+                 ORDER BY y.calendar_year""", (plan_node_id,))
 
         pursuits = fetch_all(cur, f"""
             SELECT p.id, p.external_opportunity_id AS opp_id, p.name,
@@ -230,6 +241,13 @@ async def bootstrap(p: Principal = Depends(current_principal)):
                  "roles": list(p.roles)},
         "planning_year": plan_start,
         "targets": plan,
+        # Present whenever the caller's scope covers more than one
+        # license-boundary BU -- the Targets & Budgets view uses this to
+        # show a picker instead of the (empty, above) targets directly.
+        # Empty for a single-BU user; nothing changes for them.
+        "target_org_nodes": [{"id": str(n["id"]), "code": n["code"],
+                              "name": n["name"]} for n in plan_org_nodes]
+                            if len(plan_org_nodes) > 1 else [],
         "pursuits": out,
         "staffing": staffing,
     }

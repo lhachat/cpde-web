@@ -250,7 +250,9 @@ def main():
     r2 = safe(B.get, "/api/plan-years")
     found = None
     if r2.status_code == 200:
-        found = next((row for row in r2.json()
+        body2 = r2.json()
+        years_list = body2.get("years", []) if isinstance(body2, dict) else body2
+        found = next((row for row in years_list
                      if row.get("calendar_year") == test_year), None)
     check("the written value reads back via GET /api/plan-years",
           found is not None and float(found.get("revenue_target") or 0) == 12345678,
@@ -279,6 +281,70 @@ def main():
     # Clean up -- this test year must never linger and pollute the real plan.
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         db.execute("DELETE FROM plan_year WHERE calendar_year = %s", (test_year,))
+        db.commit()
+
+    # ---- 9c. plan-year multi-BU disambiguation -------------------------
+    # A is AERO admin -- two license-boundary BUs (BU, BU2) visible.
+    print("\n=== 9c. plan-year multi-BU disambiguation ===")
+
+    r = safe(A.get, "/api/plan-years")
+    body = r.json() if r.status_code == 200 else {}
+    check("GET /api/plan-years for a multi-BU user is not a bare, "
+          "unmarked list -- it signals ambiguity explicitly",
+          r.status_code == 200 and isinstance(body, dict) and body.get("ambiguous") is True,
+          f"got {r.status_code}: {r.text[:200]}")
+    get_candidates = body.get("candidates") if isinstance(body, dict) else None
+    check("the ambiguous GET response lists the real candidate BUs",
+          isinstance(get_candidates, list) and len(get_candidates) >= 2
+          and all({"id", "code", "name"} <= set(c) for c in get_candidates),
+          f"got {get_candidates}")
+
+    test_year2 = 2098   # a second implausible year, distinct from 9b's
+    r = safe(A.put, f"/api/plan-years/{test_year2}", json={"revenue_target": 1})
+    detail = r.json().get("detail") if r.status_code == 409 else None
+    put_candidates = detail.get("candidates") if isinstance(detail, dict) else None
+    check("PUT with no org_node_id for a multi-BU user 409s with a "
+          "candidate list, not just a plain error string",
+          r.status_code == 409 and isinstance(put_candidates, list)
+          and len(put_candidates) >= 2
+          and all({"id", "code", "name"} <= set(c) for c in put_candidates),
+          f"got {r.status_code}: {r.text[:300]}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        aero_bu = db.execute("""
+            SELECT o.id FROM org_node o JOIN client c ON c.id = o.client_id
+             WHERE c.code = 'AERO' AND o.code = 'BU'""").fetchone()
+        demo_bu = db.execute("""
+            SELECT o.id FROM org_node o JOIN client c ON c.id = o.client_id
+             WHERE c.code = 'DEMO' AND o.is_license_boundary LIMIT 1""").fetchone()
+
+    r = safe(A.put, f"/api/plan-years/{test_year2}?org_node_id={aero_bu['id']}",
+             json={"revenue_target": 11111111})
+    check("PUT with a valid org_node_id from the candidate set succeeds",
+          r.status_code == 200, f"got {r.status_code}: {r.text[:200]}")
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        written = db.execute("""
+            SELECT org_node_id, revenue_target FROM plan_year
+             WHERE calendar_year = %s AND org_node_id = %s""",
+            (test_year2, aero_bu["id"])).fetchone()
+    check("the write landed on the SPECIFIED business unit's plan_year "
+          "row, not an arbitrary one",
+          written is not None and float(written["revenue_target"]) == 11111111,
+          f"got {written}")
+
+    r = safe(A.put, f"/api/plan-years/{test_year2}?org_node_id={demo_bu['id']}",
+             json={"revenue_target": 99999})
+    check("PUT with an org_node_id outside the user's scope is rejected, "
+          "not silently accepted", r.status_code in (403, 404),
+          f"got {r.status_code}: {r.text[:200]}")
+
+    r = safe(B.get, f"/api/plan-years?org_node_id={aero_bu['id']}")
+    check("GET with an org_node_id outside the caller's scope is "
+          "rejected, not silently accepted (DEMO admin, AERO's BU id)",
+          r.status_code in (403, 404), f"got {r.status_code}: {r.text[:200]}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        db.execute("DELETE FROM plan_year WHERE calendar_year = %s", (test_year2,))
         db.commit()
 
     # ---- 10. the audit trail actually records ------------------------

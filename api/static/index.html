@@ -1660,10 +1660,48 @@ function vBP(){
    pattern (editBar()) and dirty-highlighting convention as pursuit
    detail, not a different mechanism. */
 let targetBuf = {};                 // {year: {uiField: value}}
+// Which business unit's plan is being viewed/edited, when the caller's
+// scope covers more than one (D.target_org_nodes non-empty). A plain
+// top-level variable, deliberately not reset by loadData() itself --
+// saveTargets() calls loadData() internally to refresh after a save,
+// and the picked BU must survive that, not force a re-pick on every
+// save. Only a genuine page reload (a fresh script execution) or
+// signing out clears it -- re-picking after either is fine.
+let selectedTargetOrgNode = null;
 const TARGET_UI_TO_API = {
   esc:'escalation_rate', rev_target:'revenue_target', fee_target:'fee_target',
   bp_budget:'budgeted_bp', inv_budget:'budgeted_investment',
 };
+const PLAN_YEAR_API_TO_UI = {
+  escalation_rate:'esc', revenue_target:'rev_target', fee_target:'fee_target',
+  budgeted_bp:'bp_budget', budgeted_investment:'inv_budget',
+  current_contract_revenue:'other_rev', current_contract_fee:'other_fee',
+};
+function applyPlanYearsResponse(years){
+  (years||[]).forEach(row=>{
+    const y = row.calendar_year;
+    const t = {year:y, esc:0, rev_target:0, fee_target:0, bp_budget:0,
+              inv_budget:0, other_rev:0, other_fee:0};
+    Object.entries(PLAN_YEAR_API_TO_UI).forEach(([apiKey,uiKey])=>{
+      t[uiKey] = +row[apiKey] || 0;});
+    TG[y] = t;
+  });
+  YRS.forEach(y=>{ if(!TG[y]) TG[y]={year:y,rev_target:0,fee_target:0,
+    bp_budget:0,inv_budget:0,esc:0,other_rev:0,other_fee:0}; });
+}
+async function pickTargetOrgNode(node){
+  selectedTargetOrgNode = node;
+  targetBuf = {};
+  try{
+    const res = await fetch(`/api/plan-years?org_node_id=${node.id}`,
+      {credentials:'same-origin'});
+    if(res.status===401){ showLogin(); return; }
+    if(!res.ok){ toast(`Could not load targets for ${node.name}.`, true); return; }
+    const body = await res.json();
+    applyPlanYearsResponse(body.years);
+    vTargets();
+  }catch(e){ toast(`Could not load targets: ${e.message}`, true); }
+}
 function targetDirtyCount(){
   return Object.values(targetBuf).reduce((n,y)=>n+Object.keys(y).length,0);
 }
@@ -1691,7 +1729,9 @@ async function saveTargets(){
       const payload = {};
       for(const [uiKey,val] of Object.entries(targetBuf[y]))
         payload[TARGET_UI_TO_API[uiKey]] = val;
-      const res = await fetch(`/api/plan-years/${y}`, {
+      const qs = selectedTargetOrgNode
+        ? `?org_node_id=${selectedTargetOrgNode.id}` : '';
+      const res = await fetch(`/api/plan-years/${y}${qs}`, {
         method:'PUT', credentials:'same-origin',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify(payload)});
@@ -1710,12 +1750,45 @@ async function saveTargets(){
     // Same load path as everywhere else -- loadData() rebuilds TG from
     // the fresh D.targets inside rebuildDerived(), and render() redraws
     // every view including the dashboard's charts, so this closes the
-    // loop without any separate propagation step.
-    if(await loadData()){ render(); show(cur); }
+    // loop without any separate propagation step -- EXCEPT for a
+    // multi-BU user: bootstrap.py embeds no targets at all when the
+    // scope is ambiguous (see D.target_org_nodes), so loadData() alone
+    // would silently wipe TG back to zero even though the BU selection
+    // itself survives. Re-apply that BU's real data on top before
+    // rendering.
+    if(await loadData()){
+      if(selectedTargetOrgNode){
+        const res = await fetch(`/api/plan-years?org_node_id=${selectedTargetOrgNode.id}`,
+          {credentials:'same-origin'});
+        if(res.ok) applyPlanYearsResponse((await res.json()).years);
+      }
+      render(); show(cur);
+    }
     toast('Saved.');
   }catch(e){ toast(`Could not save: ${e.message}`, true); }
 }
 function vTargets(){
+  if((D.target_org_nodes||[]).length && !selectedTargetOrgNode){
+    // Ambiguous scope, per plan_scope.py's resolver -- show a picker
+    // instead of a blind failure or silently-merged data. A single-BU
+    // user never reaches this branch at all (D.target_org_nodes is
+    // always empty for them), so nothing changes in their flow.
+    $('#targets').innerHTML = `<div class="card"><h3>Targets &amp; budgets</h3>
+      <div class="pad">
+        <p style="margin:0 0 10px">Your scope covers more than one business
+          unit's plan. Choose one to view or edit its targets.</p>
+        <select id="tgBuPicker" data-bu-picker>
+          <option value="">Choose a business unit\u2026</option>
+          ${D.target_org_nodes.map(n=>
+            `<option value="${n.id}">${n.name} (${n.code})</option>`).join('')}
+        </select>
+      </div></div>`;
+    $('#tgBuPicker').onchange = e=>{
+      const node = D.target_org_nodes.find(n=>n.id===e.target.value);
+      if(node) pickTargetOrgNode(node);
+    };
+    return;
+  }
   if(!Object.keys(TG).length){
     $('#targets').innerHTML = `<div class="card"><h3>Targets &amp; budgets</h3>
       <div class="pad"><p style="margin:0">No annual plan has been set for the
@@ -2624,6 +2697,7 @@ async function loadData(){
       hideChangeBanner();
       SB = null; sbSel = null; selUid = null; detailMode = false; page = 1;
       editBuf = {}; editUid = null; REF = null;
+      targetBuf = {}; selectedTargetOrgNode = null;
       sortKey = 'value'; sortDir = -1;
       FLT = {market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:''};
       cur = 'dash';          // a new session starts at the dashboard

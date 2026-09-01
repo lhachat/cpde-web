@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
+from ..plan_scope import resolve_license_boundary_nodes
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -50,16 +51,54 @@ async def me(p: Principal = Depends(current_principal)):
 
 
 @router.get("/plan-years")
-async def plan_years(p: Principal = Depends(current_principal)):
+async def plan_years(
+    p: Principal = Depends(current_principal),
+    org_node_id: str | None = Query(default=None,
+        description="Required when the caller's scope covers more than "
+                    "one license-boundary business unit -- see the "
+                    "ambiguous response's candidates list."),
+):
+    """Previously this queried every visible org node at once with no
+    way to tell rows from different business units apart -- silently
+    correct only by coincidence, for as long as at most one BU actually
+    had data. Same disambiguation as PUT /plan-years/{year}, but a read
+    degrades gracefully (ambiguous: true, empty years) instead of
+    raising, since a caller can reasonably want to know the candidates
+    before ever choosing one."""
     with tenant_tx(p.client_id) as cur:
-        return fetch_all(cur, """
+        nodes = resolve_license_boundary_nodes(cur, p.user_id)
+        if not nodes:
+            return {"ambiguous": False, "org_node_id": None, "years": []}
+
+        if org_node_id:
+            try:
+                wanted = str(UUID(org_node_id))
+            except (ValueError, AttributeError, TypeError):
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    "business unit not found in your scope")
+            match = next((n for n in nodes if str(n["id"]) == wanted), None)
+            if not match:
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    "business unit not found in your scope")
+            node_id = match["id"]
+        elif len(nodes) == 1:
+            node_id = nodes[0]["id"]
+        else:
+            return {
+                "ambiguous": True,
+                "candidates": [{"id": str(n["id"]), "code": n["code"],
+                               "name": n["name"]} for n in nodes],
+                "years": [],
+            }
+
+        years = fetch_all(cur, """
             SELECT y.calendar_year, y.escalation_rate, y.revenue_target,
                    y.fee_target, y.budgeted_bp, y.budgeted_investment,
                    y.current_contract_revenue, y.current_contract_fee
               FROM plan_year y
-             WHERE y.org_node_id IN (SELECT org_node_id
-                                       FROM fn_user_visible_org_nodes(%s))
-             ORDER BY y.calendar_year""", (p.user_id,))
+             WHERE y.org_node_id = %s
+             ORDER BY y.calendar_year""", (node_id,))
+        return {"ambiguous": False, "org_node_id": str(node_id), "years": years}
 
 
 @router.get("/markets")

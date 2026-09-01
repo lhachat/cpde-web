@@ -9,6 +9,77 @@ it does.
 
 ---
 
+## [0.3.1] — 2026-09-01
+
+Resolves the top Known Gap from v0.3.0: Targets & Budgets was unusable
+for AERO's real admin user, because `plan_year` had no way to say which
+of a user's several license-boundary business units a read or write
+applied to.
+
+### Investigation finding, stated plainly
+
+Before this fix, `GET /api/plan-years` did **not** already refuse like
+`PUT` did — it silently queried every visible org node at once with no
+way to tell which business unit a row belonged to, and returned
+whatever it found as a bare, unmarked list. For a multi-BU user this
+looked correct only by coincidence: AERO's BU2 happens to hold zero
+`plan_year` rows today, so the merge never visibly collided. The moment
+BU2 got any target data of its own, this endpoint -- and `bootstrap.py`'s
+own separate copy of the same query, which is what actually feeds the
+Targets page and every dashboard chart -- would have silently returned
+ambiguous or wrong numbers with no indication anything was wrong. That
+is worse than `PUT`'s explicit 409, and is now fixed the same way.
+
+### Fixed
+
+- New shared resolver (`api/app/plan_scope.py`), reused by `PUT
+  /api/plan-years/{year}`, `GET /api/plan-years`, and `bootstrap.py`'s
+  embedded plan query -- one place the disambiguation logic lives,
+  not three that could drift.
+- Both endpoints now accept an optional `org_node_id`. Exactly one
+  candidate BU in scope: behaves exactly as before, no parameter
+  required -- confirmed backward compatible for `demo.admin` and every
+  other single-BU user, byte-for-byte unchanged flow.
+- Multiple candidates, no `org_node_id`: `PUT` 409s and `GET` returns
+  `{"ambiguous": true, ...}`, both now carrying the real candidate list
+  (`{id, code, name}` each) instead of a plain string with no recovery
+  path.
+- `org_node_id` supplied: verified against the caller's own resolved
+  candidate set before use -- an id outside scope (or a different
+  tenant's id entirely) is rejected, never silently accepted. Verified
+  directly: a DEMO admin's cross-tenant attempt using AERO's own BU id
+  was rejected.
+- `bootstrap.py` embeds no targets at all for a multi-BU user (rather
+  than the old silent merge) and adds `target_org_nodes` so the frontend
+  can offer a picker instead of presenting arbitrary numbers as if they
+  were real.
+- Frontend: Targets & Budgets shows a BU picker only when
+  `D.target_org_nodes` is non-empty. Picking a BU fetches its real data
+  via the now-fixed `GET`, and the selection is remembered for the
+  session (survives an internal post-save reload, resets on sign-out or
+  a genuine page reload) so `PUT` calls carry the right `org_node_id`.
+  A single-BU user never sees the picker at all.
+
+### Verified
+
+- All 6 of this round's RED checks (4 backend, 2 Playwright) confirmed
+  failing for the right reasons before any fix, all green after.
+- Driven live as `aero.admin`: picked "Advanced Systems (BU)" from two
+  candidates, edited 2027's revenue target, saved, reloaded. Checked the
+  underlying `plan_year` row's `org_node_id` directly, not just the UI
+  round-trip -- landed on `BU`, confirmed `BU2` untouched (0 rows).
+  Audit trail shows the correct before/after diff, attributed correctly.
+  Restored via the real write path afterward.
+- `demo.admin`'s existing single-BU flow re-verified end-to-end
+  (edit -> save -> reload) with zero picker, zero behavior change --
+  the backward-compatibility check that mattered most here, since it's
+  the path that already worked and could not regress.
+- 164 assertions passing across five suites (up from 157 at v0.3.0):
+  isolation 29, scope 12, integrity 41 (1 non-fatal warning),
+  api_security 76, staffing_escalation 6.
+
+---
+
 ## [0.3.0] — 2026-09-01
 
 Real engine-integrated Pwin recalculation, and full closure of the

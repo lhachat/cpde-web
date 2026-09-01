@@ -29,11 +29,12 @@ from decimal import Decimal
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
 from ..auth import Principal, current_principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
+from ..plan_scope import resolve_plan_year_node
 from ..recalc import recalculate_pwin
 
 router = APIRouter(prefix="/api", tags=["write"])
@@ -362,6 +363,10 @@ class PlanYearIn(BaseModel):
 async def put_plan_year(
     calendar_year: int,
     body: PlanYearIn,
+    org_node_id: str | None = Query(default=None,
+        description="Required when the caller's scope covers more than "
+                    "one license-boundary business unit -- see the 409 "
+                    "response's candidates list."),
     p: Principal = Depends(require_role("admin", "executive")),
 ):
     """Targets are a planning act, not day-to-day editing -- admin or
@@ -374,21 +379,7 @@ async def put_plan_year(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "no fields supplied")
 
     with tenant_tx(p.client_id, p.user_id) as cur:
-        # Write to the licence-boundary node the user can actually see. If a
-        # user is scoped to several, that is ambiguous and we refuse rather
-        # than guess which plan they meant.
-        nodes = fetch_all(cur, """
-            SELECT o.id, o.code FROM org_node o
-             WHERE o.id IN (SELECT org_node_id FROM fn_user_visible_org_nodes(%s))
-               AND o.is_license_boundary AND o.is_active""", (p.user_id,))
-        if not nodes:
-            raise HTTPException(status.HTTP_403_FORBIDDEN,
-                                "no business unit in scope")
-        if len(nodes) > 1:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "scope covers several business units; specify which plan to edit")
-        node_id = nodes[0]["id"]
+        node_id = resolve_plan_year_node(cur, p.user_id, org_node_id)
 
         cols = ", ".join(fields)
         ph = ", ".join(["%s"] * len(fields))
