@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..auth import Principal, current_principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
-from ..plan_scope import resolve_plan_year_node
+from ..plan_scope import resolve_plan_year_node, resolve_pursuit_org_node
 from ..recalc import recalculate_pwin
 
 router = APIRouter(prefix="/api", tags=["write"])
@@ -89,8 +89,11 @@ PURSUIT_REFS = {
 # NOT writable here, each needing its own endpoint and its own rules:
 #   outcome             closes the pursuit and freezes it; see /outcome
 #   client_id           tenancy is never caller-supplied
-#   org_node_id         moves a pursuit between scopes
 #   depends_on_pursuit_id  changes the two-assessment requirement
+#
+# org_node_id IS writable, but not through PURSUIT_REFS -- it needs
+# scope validation (resolve_pursuit_org_node), not a simple code lookup
+# against a reference table, so it gets its own resolution step below.
 
 
 class PursuitPatch(BaseModel):
@@ -108,6 +111,7 @@ class PursuitPatch(BaseModel):
     opportunity_type_code: str | None = Field(default=None, max_length=50)
     contract_type_code: str | None = Field(default=None, max_length=50)
     pipeline_stage_code: str | None = Field(default=None, max_length=50)
+    org_unit_code: str | None = Field(default=None, max_length=50)
     bid_decision: str | None = None
     # The engine's tournament solve does not support more than 6.
     bidders: int | None = Field(default=None, ge=1, le=6)
@@ -135,6 +139,16 @@ async def patch_pursuit(
     pursuit_id = _uuid(pursuit_id)
     fields = body.model_dump(exclude_unset=True, exclude_none=False)
     expected = fields.pop("expected_updated_at", None)
+    # org_unit_code needs scope validation (who is this CALLER allowed to
+    # move a pursuit to), not a simple reference-table lookup like the
+    # other _code fields -- resolved separately, below, once we're inside
+    # the transaction. org_node_id is NOT NULL on pursuit, so an explicit
+    # null here is a caller error, not "leave it unchanged".
+    org_unit_code_set = "org_unit_code" in fields
+    org_unit_code = fields.pop("org_unit_code", None)
+    if org_unit_code_set and org_unit_code is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "org_unit_code cannot be cleared")
     refs = {k: v for k, v in fields.items() if k in PURSUIT_REFS}
     if ("external_opportunity_id" in fields
             and fields["external_opportunity_id"] is not None
@@ -144,7 +158,7 @@ async def patch_pursuit(
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "only an administrator can change the Opportunity ID")
     fields = {k: v for k, v in fields.items() if k in PURSUIT_FIELDS}
-    if not fields and not refs:
+    if not fields and not refs and not org_unit_code_set:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "no writable fields")
 
     with tenant_tx(p.client_id, p.user_id) as cur:
@@ -223,6 +237,16 @@ async def patch_pursuit(
             fields[col] = found["id"]
             columns[col] = col
 
+        if org_unit_code_set:
+            # 404, never 403: resolve_pursuit_org_node validates the code
+            # against THIS CALLER's own assignable set (their visible
+            # scope, narrowed to leaf-only nodes) -- an out-of-scope or
+            # unknown code is indistinguishable from "does not exist" to
+            # the caller, matching this file's own convention everywhere
+            # else an id/code outside scope is rejected.
+            fields["org_node_id"] = resolve_pursuit_org_node(cur, p.user_id, org_unit_code)
+            columns["org_node_id"] = "org_node_id"
+
         sets = ", ".join(f"{columns[k]} = %s" for k in fields)
         # NOTE: column names come from the whitelist, never from the payload.
         # Values are always parameters -- no interpolation of user data.
@@ -232,7 +256,7 @@ async def patch_pursuit(
              WHERE p.id = %s AND {SCOPED}
          RETURNING p.id, p.external_opportunity_id, p.name, p.bid_decision,
                    p.bidders, p.is_sole_source, p.planned_total_award_value,
-                   p.planned_fee_rate, p.planned_investment,
+                   p.planned_fee_rate, p.planned_investment, p.org_node_id,
                    p.bp_start_date, p.proposal_due_date,
                    p.contract_award_date, p.period_end_date,
                    p.updated_at""", tuple(params))

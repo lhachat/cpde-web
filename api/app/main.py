@@ -9,6 +9,8 @@ Then open http://localhost:8000/docs
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from pathlib import Path
 
@@ -22,9 +24,19 @@ from .auth import (DEV_LOGIN_ENABLED, SESSION_COOKIE, Principal,
                    create_session, current_principal, destroy_session,
                    lookup_user)
 from .db import close_pool, pool
+from .market_sync import market_sync_loop
 from .routers import bhptw, bootstrap, portfolio, recalc, staffing, write
 
-app = FastAPI(title="CPDE API", version="0.2.0")
+# Nothing in this app configured logging before market_sync.py existed --
+# every logger.info/error call was silently dropped by the root logger's
+# default WARNING level. INFO here so a background job's run summary
+# actually reaches `docker logs`, not just uvicorn's own access log.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("cpde")
+
+app = FastAPI(title="CPDE API", version="0.4.0")
 
 # Locked to the local dev origin. allow_credentials with a wildcard origin is
 # rejected by browsers and would be wrong anyway -- the session cookie must
@@ -46,13 +58,41 @@ app.include_router(bhptw.router)
 app.include_router(recalc.router)
 
 
+_market_sync_task: asyncio.Task | None = None
+
+
 @app.on_event("startup")
 def _startup() -> None:
+    global _market_sync_task
     pool()
+    # OFF by default IN THIS CODE, deliberately -- but that default was
+    # for the gate that used to exist here (blocked on the engine
+    # team's three-layer client-config migration). That gate is now
+    # CONFIRMED CLEAR for all three real clients (cda-internal,
+    # collins-aerospace, empower-ai) -- see market_sync.py's own
+    # docstring for the verification history. docker-compose.yml
+    # already sets MARKET_SYNC_ENABLED=true for local dev.
+    #
+    # THERE IS NO SEPARATE PRODUCTION DEPLOYMENT YET (cpdeWebTaskRole
+    # exists but is inert, no ECS task attached). Whoever builds that
+    # deployment: set MARKET_SYNC_ENABLED=true in its env config FROM
+    # DAY ONE. The code-level default here stays "false" only so a
+    # future environment that forgets to set ANY value fails safe
+    # (disabled, not silently syncing) rather than fails open --
+    # that is not the same thing as "off is the intended production
+    # state". Do not treat this default as something that still needs
+    # deciding; it was already decided and is documented here so it
+    # does not need rediscovering as a gap.
+    if os.environ.get("MARKET_SYNC_ENABLED", "false").lower() == "true":
+        _market_sync_task = asyncio.create_task(market_sync_loop())
+    else:
+        logger.info("market sync disabled (MARKET_SYNC_ENABLED not set)")
 
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
+    if _market_sync_task is not None:
+        _market_sync_task.cancel()
     close_pool()
 
 

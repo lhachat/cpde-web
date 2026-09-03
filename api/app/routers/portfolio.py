@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
-from ..plan_scope import resolve_license_boundary_nodes
+from ..plan_scope import exclude_test_fixtures, resolve_license_boundary_nodes
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -66,6 +66,12 @@ async def plan_years(
     raising, since a caller can reasonably want to know the candidates
     before ever choosing one."""
     with tenant_tx(p.client_id) as cur:
+        # UNFILTERED -- the real access-control candidate set, used for
+        # validation and single-candidate resolution below. The
+        # "candidates" list actually shown to the caller in the
+        # ambiguous branch filters through exclude_test_fixtures at that
+        # exact point, so a genuinely test-fixture-scoped user's own
+        # access is never affected by what a picker chooses to display.
         nodes = resolve_license_boundary_nodes(cur, p.user_id)
         if not nodes:
             return {"ambiguous": False, "org_node_id": None, "years": []}
@@ -87,7 +93,8 @@ async def plan_years(
             return {
                 "ambiguous": True,
                 "candidates": [{"id": str(n["id"]), "code": n["code"],
-                               "name": n["name"]} for n in nodes],
+                               "name": n["name"]}
+                              for n in exclude_test_fixtures(nodes)],
                 "years": [],
             }
 

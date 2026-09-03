@@ -22,12 +22,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, timedelta
+from decimal import Decimal
 
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 
-from ..auth import Principal, current_principal
+from ..auth import Principal, current_principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
 from ..staffing_escalation import apply_escalation_to_fte
 
@@ -146,6 +148,60 @@ def client_escalation_rates(cur) -> dict[int, float]:
     needed here."""
     rows = fetch_all(cur, "SELECT calendar_year, rate FROM client_escalation_rate")
     return {r["calendar_year"]: float(r["rate"]) for r in rows}
+
+
+@router.get("/escalation-rates")
+async def escalation_rates(p: Principal = Depends(current_principal)):
+    """This tenant's current per-year overrides. RLS scopes the read;
+    no explicit client_id filter needed, same as client_escalation_rates."""
+    with tenant_tx(p.client_id) as cur:
+        rows = fetch_all(cur, """
+            SELECT calendar_year, rate, updated_at FROM client_escalation_rate
+             ORDER BY calendar_year""")
+    return {"rates": rows}
+
+
+class EscalationRateIn(BaseModel):
+    # A per-year rate is a few percent in the generic table (1.9%-5.4%
+    # across 2026-2031 -- see GENERIC_ESCALATION_RATES in
+    # staffing_escalation.py). -50%..+50% is deliberately much wider
+    # than that -- a client-specific override exists precisely for the
+    # unusual year a generic table can't capture (a severe union
+    # contract negotiation, a genuinely deflationary environment) -- but
+    # still guards against a fat-fingered 5.0 meaning 500% rather than
+    # 5%, which no real labor market produces in a single year.
+    rate: Decimal = Field(..., ge=Decimal("-0.5"), le=Decimal("0.5"))
+
+
+@router.put("/escalation-rates/{calendar_year}")
+async def put_escalation_rate(
+    calendar_year: int,
+    body: EscalationRateIn,
+    p: Principal = Depends(require_role("admin", "executive")),
+):
+    """Same role gate as PUT /api/plan-years/{year} -- a planning/finance
+    setting, not day-to-day editing. A capture manager should not be able
+    to move the escalation basis every staffing figure is computed against.
+
+    Deliberately NOT audited via fn_audit, matching this table's own
+    documented design (ddl/14_staffing_escalation.sql): it is operational
+    configuration, not pursuit data -- a changed_fields diff on a single
+    rate column adds noise, not signal. tenant_tx(client_id, user_id) is
+    still used, matching every other write in this codebase, even though
+    no trigger here currently consumes the attributed user_id."""
+    if not 2000 <= calendar_year <= 2100:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "implausible year")
+
+    with tenant_tx(p.client_id, p.user_id) as cur:
+        row = fetch_one(cur, """
+            INSERT INTO client_escalation_rate (client_id, calendar_year, rate, updated_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (client_id, calendar_year)
+                DO UPDATE SET rate = EXCLUDED.rate, updated_at = now()
+         RETURNING calendar_year, rate, updated_at""",
+            (p.client_id, calendar_year, body.rate))
+    return row
+
 
 def _pursuit_filter(open_only: bool) -> str:
     """Cancelled work never counts. Closed work counts unless excluded."""

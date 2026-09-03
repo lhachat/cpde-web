@@ -87,9 +87,69 @@ def main():
     b_pursuit = next(r for r in rows if r["code"] == "DEMO")
     print(f"Tenants: {counts}\n")
 
+    # A BU-scoped fixture user, same pattern test_scope.py already uses for
+    # aero.div1 -- AERO's BU (Advanced Systems) has DIV1 beneath it, so this
+    # is a real BU-scoped user with a real division in their own subtree,
+    # needed to test the Dashboard scope selector's "BU-scoped: rollup or a
+    # specific division" tier. Idempotent (ON CONFLICT DO NOTHING), so safe
+    # to run standalone or as part of the full suite.
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        db.execute("""
+            INSERT INTO app_user (client_id, email, display_name)
+            SELECT c.id, 'aero.bu1@demoaero.test', 'Aero BU1 Capture Mgr'
+              FROM client c WHERE c.code = 'AERO'
+            ON CONFLICT (client_id, email) DO NOTHING""")
+        db.execute("""
+            INSERT INTO user_scope_assignment (user_id, org_node_id, role_id)
+            SELECT u.id, o.id, r.id
+              FROM app_user u
+              JOIN org_node o ON o.client_id = u.client_id AND o.code = 'BU'
+              JOIN role r ON r.code = 'capture_manager'
+             WHERE u.email = 'aero.bu1@demoaero.test'
+            ON CONFLICT (user_id, org_node_id, role_id) DO NOTHING""")
+        # A genuinely empty org node -- BU2, DIV1/2/3 all hold real
+        # pursuits now (AERO's org structure grew real content), so none
+        # of them can prove "narrow scope excludes" any more. A fixture
+        # BU, sibling of BU/BU2 directly under the root -- not a child of
+        # either, since BU has exactly three real divisions and BU2
+        # deliberately has none (the Dashboard picker's one-level-branch
+        # test relies on that). Same fixture test_scope.py creates --
+        # idempotent, safe if both run.
+        db.execute("""
+            INSERT INTO org_node (client_id, parent_id, node_type, code,
+                                  name, is_license_boundary)
+            SELECT c.id, o.id, 'business_unit', 'BUZ', 'Zero-Pursuit Test BU', true
+              FROM client c JOIN org_node o ON o.client_id = c.id AND o.code = 'BUSINESS'
+             WHERE c.code = 'AERO'
+            ON CONFLICT (client_id, code) DO NOTHING""")
+        db.execute("""
+            INSERT INTO app_user (client_id, email, display_name)
+            SELECT c.id, 'aero.buz@demoaero.test', 'Aero Empty-BU Capture Mgr'
+              FROM client c WHERE c.code = 'AERO'
+            ON CONFLICT (client_id, email) DO NOTHING""")
+        db.execute("""
+            INSERT INTO user_scope_assignment (user_id, org_node_id, role_id)
+            SELECT u.id, o.id, r.id
+              FROM app_user u
+              JOIN org_node o ON o.client_id = u.client_id AND o.code = 'BUZ'
+              JOIN role r ON r.code = 'capture_manager'
+             WHERE u.email = 'aero.buz@demoaero.test'
+            ON CONFLICT (user_id, org_node_id, role_id) DO NOTHING""")
+        db.commit()
+
     A = login(args.base, args.user_a)          # AERO admin
     B = login(args.base, args.user_b)          # DEMO admin
-    N = login(args.base, args.user_narrow)     # AERO, scoped to an empty BU
+    # BU2 now holds 27 real pursuits (AERO's org structure grew real
+    # content -- see plan_scope's dashboard rollup round), so N is no
+    # longer an EMPTY scope, just a narrow one. It still correctly
+    # excludes any pursuit outside BU2, which is all the tests below it
+    # actually need -- only the "sees literally nothing" check needs a
+    # genuinely empty scope, which DZ (the empty test-fixture BU)
+    # provides instead.
+    N = login(args.base, args.user_narrow)     # AERO, scoped to BU2 (27 real pursuits)
+    DV = login(args.base, "aero.div1@demoaero.test")  # AERO, scoped to DIV1
+    U1 = login(args.base, "aero.bu1@demoaero.test")   # AERO, scoped to BU
+    DZ = login(args.base, "aero.buz@demoaero.test")   # AERO, scoped to a genuinely empty BU
 
     # ---- 1. nothing is reachable without a session --------------------
     print("=== 1. authentication required ===")
@@ -149,10 +209,15 @@ def main():
 
     # ---- 4. scope, not just tenancy ----------------------------------
     print("\n=== 4. business-unit scope is enforced on reads ===")
+    dz_boot = safe(DZ.get, "/api/bootstrap").json()
+    check("a genuinely empty scope sees no pursuits",
+          len(dz_boot["pursuits"]) == 0,
+          f"saw {len(dz_boot['pursuits'])} from a division that holds none")
     n_boot = safe(N.get, "/api/bootstrap").json()
-    check("narrow-scope user sees no pursuits",
-          len(n_boot["pursuits"]) == 0,
-          f"saw {len(n_boot['pursuits'])} from a BU that holds none")
+    check("narrow-scope (BU2) user sees strictly fewer pursuits than the "
+          "tenant total (BU2's own 27, not the whole AERO tenant's)",
+          0 < len(n_boot["pursuits"]) < counts["AERO"],
+          f"saw {len(n_boot['pursuits'])} of {counts['AERO']} total AERO pursuits")
     r = safe(N.get, f"/api/pursuits/{a_pursuit['id']}")
     check("narrow-scope user cannot GET an out-of-scope pursuit in the same tenant",
           r.status_code == 404, f"got {r.status_code}")
@@ -234,20 +299,31 @@ def main():
           f"got {r.status_code}")
 
     # ---- 9b. plan-year writes persist and are audited ------------------
-    # Uses B (DEMO admin), not A (AERO admin): AERO's org tree has two
-    # license-boundary business units (BU, BU2) both visible to the
-    # top-scoped AERO admin, so a bare PUT correctly 409s there as
-    # ambiguous ("specify which plan to edit") -- that is the endpoint
-    # working as designed, not a bug. DEMO has exactly one, so its admin
-    # resolves unambiguously.
+    # Uses B (DEMO admin) with an explicit org_node_id. Every admin in
+    # this system is scope-assigned at their tenant's root "BUSINESS"
+    # node (confirmed directly against user_scope_assignment, not
+    # assumed), so root-scope inclusion (9d) means EVERY admin -- DEMO's
+    # included -- now sees at least two candidates (the whole business
+    # plus their one BU) and a bare PUT with no org_node_id correctly
+    # 409s as ambiguous. That is the endpoint working as designed, not a
+    # bug -- it is the same "choose the entire business" capability
+    # applying uniformly, not something AERO-specific. This section only
+    # cares about persistence/audit behavior, so it targets DEMO's BU
+    # explicitly rather than relying on implicit single-candidate
+    # resolution that no longer exists for any admin.
     print("\n=== 9b. plan-year writes persist and are audited ===")
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        demo_bu_for_9b = db.execute("""
+            SELECT o.id FROM org_node o JOIN client c ON c.id = o.client_id
+             WHERE c.code = 'DEMO' AND o.is_license_boundary LIMIT 1""").fetchone()
     test_year = 2099   # implausible enough to never collide with real data
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         n_before = db.execute("SELECT count(*) AS n FROM audit_log").fetchone()["n"]
-    r = safe(B.put, f"/api/plan-years/{test_year}", json={"revenue_target": 12345678})
+    r = safe(B.put, f"/api/plan-years/{test_year}?org_node_id={demo_bu_for_9b['id']}",
+             json={"revenue_target": 12345678})
     check("admin can PUT a plan-year", r.status_code == 200,
           f"got {r.status_code}: {r.text[:150]}")
-    r2 = safe(B.get, "/api/plan-years")
+    r2 = safe(B.get, f"/api/plan-years?org_node_id={demo_bu_for_9b['id']}")
     found = None
     if r2.status_code == 200:
         body2 = r2.json()
@@ -262,7 +338,8 @@ def main():
     # trigger behavior, not what we're checking. A second write to the
     # SAME (now-existing) row is a genuine UPDATE and should show a
     # proper before/after diff for the changed field.
-    r3 = safe(B.put, f"/api/plan-years/{test_year}", json={"revenue_target": 87654321})
+    r3 = safe(B.put, f"/api/plan-years/{test_year}?org_node_id={demo_bu_for_9b['id']}",
+              json={"revenue_target": 87654321})
     check("a second write to the same year succeeds", r3.status_code == 200,
           f"got {r3.status_code}")
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
@@ -345,6 +422,70 @@ def main():
 
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         db.execute("DELETE FROM plan_year WHERE calendar_year = %s", (test_year2,))
+        db.commit()
+
+    # ---- 9d. whole-business (root org node) scope ----------------------
+    # A (aero.admin) is scoped directly to AERO's root "BUSINESS" node,
+    # not just to a license-boundary BU beneath it -- picking the whole
+    # business, not just a sub-BU, must be a valid target scope too.
+    print("\n=== 9d. whole-business scope is a valid target ===")
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        aero_root = db.execute("""
+            SELECT o.id, o.code FROM org_node o JOIN client c ON c.id = o.client_id
+             WHERE c.code = 'AERO' AND o.parent_id IS NULL""").fetchone()
+        demo_root = db.execute("""
+            SELECT o.id FROM org_node o JOIN client c ON c.id = o.client_id
+             WHERE c.code = 'DEMO' AND o.parent_id IS NULL""").fetchone()
+
+    r = safe(A.get, "/api/plan-years")
+    root_candidates = (r.json() or {}).get("candidates") if r.status_code == 200 else None
+    check("the tenant's root (whole-business) org node is offered as a "
+          "candidate alongside the license-boundary BUs",
+          isinstance(root_candidates, list)
+          and any(c.get("id") == str(aero_root["id"]) for c in root_candidates),
+          f"got {root_candidates}")
+
+    test_year3 = 2097
+    r = safe(A.put, f"/api/plan-years/{test_year3}?org_node_id={aero_root['id']}",
+             json={"revenue_target": 22222222})
+    check("PUT with the root org_node_id succeeds (nothing structurally "
+          "requires a license-boundary node)",
+          r.status_code == 200, f"got {r.status_code}: {r.text[:200]}")
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        written = db.execute("""
+            SELECT org_node_id, revenue_target FROM plan_year
+             WHERE calendar_year = %s AND org_node_id = %s""",
+            (test_year3, aero_root["id"])).fetchone()
+    check("the write landed on a plan_year row keyed to the ROOT node's "
+          "org_node_id, not a license-boundary BU",
+          written is not None and float(written["revenue_target"]) == 22222222,
+          f"got {written}")
+
+    # NOTE: demo.admin is ALSO scope-assigned directly to DEMO's root
+    # "BUSINESS" node (confirmed via user_scope_assignment, same pattern
+    # as AERO's admin) -- there is no admin in this system scoped only to
+    # a single BU beneath the root. So "whole business" selectability is
+    # not AERO-specific: it now correctly applies to DEMO's admin too.
+    r = safe(B.get, "/api/plan-years")
+    b_body = r.json() if r.status_code == 200 else {}
+    b_candidates = b_body.get("candidates") if isinstance(b_body, dict) else None
+    check("DEMO's admin also gets the whole-business option now, "
+          "consistent with AERO -- not a single-BU-only exception",
+          r.status_code == 200 and b_body.get("ambiguous") is True
+          and isinstance(b_candidates, list)
+          and any(c.get("id") == str(demo_root["id"]) for c in b_candidates),
+          f"got {r.status_code}: {r.text[:250]}")
+    r = safe(B.get, f"/api/plan-years?org_node_id={demo_root['id']}")
+    check("DEMO's admin can explicitly select their own root node",
+          r.status_code == 200 and (r.json() or {}).get("org_node_id") == str(demo_root["id"]),
+          f"got {r.status_code}: {r.text[:200]}")
+    r = safe(A.get, f"/api/plan-years?org_node_id={demo_root['id']}")
+    check("AERO's admin still cannot use DEMO's root node -- cross-tenant "
+          "root access is still rejected",
+          r.status_code in (403, 404), f"got {r.status_code}: {r.text[:200]}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        db.execute("DELETE FROM plan_year WHERE calendar_year = %s", (test_year3,))
         db.commit()
 
     # ---- 10. the audit trail actually records ------------------------
@@ -557,6 +698,337 @@ def main():
                   "differential", "engine_secret", "api-key", "x-api-key"):
         check(f"no '{token}' in API responses", token not in blob.lower(),
               "present in payload")
+
+    # ---- 12. Dashboard hierarchical scope selector --------------------
+    print("\n=== 12. Dashboard hierarchical scope selector ===")
+
+    # 12a. A Division-scoped user gets no meaningful choice -- one node,
+    # no selector, matching the Targets picker's own "single candidate,
+    # no picker" convention.
+    r = safe(DV.get, "/api/bootstrap")
+    dv_body = r.json() if r.status_code == 200 else {}
+    dv_scope = dv_body.get("scope") or {}
+    dv_opts = dv_scope.get("options")
+    check("a Division-scoped user's scope selector has exactly one "
+          "option -- itself -- so no selector is offered",
+          r.status_code == 200 and isinstance(dv_opts, list) and len(dv_opts) == 1,
+          f"got {dv_opts}")
+
+    # 12b. A BU-scoped user (AERO's BU, which now has three real
+    # divisions -- DIV1/DIV2/DIV3 -- beneath it) gets the BU's own
+    # rollup plus each specific division: four options total.
+    r = safe(U1.get, "/api/bootstrap")
+    u1_body = r.json() if r.status_code == 200 else {}
+    u1_opts = (u1_body.get("scope") or {}).get("options") or []
+    u1_codes = {o["code"]: o["kind"] for o in u1_opts}
+    check("a BU-scoped user with three divisions beneath gets rollup + "
+          "each specific division, matching the real tree beneath that BU",
+          len(u1_opts) == 4 and u1_codes.get("BU") == "rollup"
+          and u1_codes.get("DIV1") == "leaf" and u1_codes.get("DIV2") == "leaf"
+          and u1_codes.get("DIV3") == "leaf",
+          f"got {u1_codes}")
+
+    # 12c. A Business-scoped user (aero.admin) gets all three tiers:
+    # whole-business rollup, each BU's own rollup, and each division
+    # directly (flattened, not nested under its BU).
+    r = safe(A.get, "/api/bootstrap")
+    a_body = r.json() if r.status_code == 200 else {}
+    a_scope = a_body.get("scope") or {}
+    a_opts = a_scope.get("options") or []
+    a_opt_codes = {o["code"]: o["kind"] for o in a_opts}
+    check("a Business-scoped user's options cover all three tiers: "
+          "the business itself, both BUs, and the division beneath BU",
+          a_opt_codes.get("BUSINESS") == "rollup"
+          and a_opt_codes.get("BU") == "rollup"
+          and a_opt_codes.get("BU2") == "rollup"
+          and a_opt_codes.get("DIV1") == "leaf",
+          f"got {a_opt_codes}")
+    root_default_id = next((o["id"] for o in a_opts if o["code"] == "BUSINESS"), None)
+    check("the Business-scoped user's default selection (no scope_node_id "
+          "given) is their own full assigned scope -- the whole business",
+          a_scope.get("current_org_node_id") == root_default_id,
+          f"got {a_scope.get('current_org_node_id')}, expected {root_default_id}")
+
+    # 12d. A Business-level rollup sums every descendant's OWN plan_year
+    # row for that year -- not zero, not just one BU's number. Give BU2
+    # a real target for a throwaway year so the sum is provably a sum,
+    # not a coincidence of BU2 already being empty.
+    root_id = next(o["id"] for o in a_opts if o["code"] == "BUSINESS")
+    bu_id = next(o["id"] for o in a_opts if o["code"] == "BU")
+    bu2_id = next(o["id"] for o in a_opts if o["code"] == "BU2")
+    test_year4 = 2096
+    safe(A.put, f"/api/plan-years/{test_year4}?org_node_id={bu_id}",
+         json={"revenue_target": 10000000})
+    safe(A.put, f"/api/plan-years/{test_year4}?org_node_id={bu2_id}",
+         json={"revenue_target": 3000000})
+    r = safe(A.get, f"/api/bootstrap?scope_node_id={root_id}")
+    body = r.json() if r.status_code == 200 else {}
+    row = next((t for t in (body.get("scope_targets") or [])
+               if t.get("year") == test_year4), None)
+    check("a whole-business rollup's target is the SUM of every "
+          "descendant's own plan_year row for that year",
+          row is not None and float(row.get("rev_target") or 0) == 13000000,
+          f"got {row}")
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        db.execute("DELETE FROM plan_year WHERE calendar_year = %s", (test_year4,))
+        db.commit()
+
+    # 12d2. Same reconciliation, but against AERO's real 2026 plan --
+    # BU and BU2 now both have real, DIFFERENT (not equal, not
+    # arbitrary) revenue targets split by actual probabilistic revenue
+    # share. This is the first real proof the rollup sums genuinely
+    # different addends, not a case that would also pass if it just
+    # returned one BU's number twice or dropped one of them silently.
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        # DEMO's own org tree also has a node coded 'BU' -- code is only
+        # unique per client, not globally -- so this must filter by
+        # client too, or it can silently pick up DEMO's row instead.
+        real_bu_2026 = db.execute("""
+            SELECT y.revenue_target FROM plan_year y JOIN org_node o ON o.id = y.org_node_id
+              JOIN client c ON c.id = o.client_id
+             WHERE c.code = 'AERO' AND o.code = 'BU' AND y.calendar_year = 2026""").fetchone()
+        real_bu2_2026 = db.execute("""
+            SELECT y.revenue_target FROM plan_year y JOIN org_node o ON o.id = y.org_node_id
+              JOIN client c ON c.id = o.client_id
+             WHERE c.code = 'AERO' AND o.code = 'BU2' AND y.calendar_year = 2026""").fetchone()
+    r = safe(A.get, f"/api/bootstrap?scope_node_id={root_id}")
+    body = r.json() if r.status_code == 200 else {}
+    row_2026 = next((t for t in (body.get("scope_targets") or [])
+                     if t.get("year") == 2026), None)
+    expected_2026 = float(real_bu_2026["revenue_target"]) + float(real_bu2_2026["revenue_target"])
+    check("the whole-business rollup for real 2026 data equals BU's real "
+          "row plus BU2's real row exactly -- two genuinely different, "
+          "non-trivial addends, not a single-value coincidence",
+          row_2026 is not None and float(row_2026["rev_target"]) == expected_2026
+          and real_bu_2026["revenue_target"] != real_bu2_2026["revenue_target"],
+          f"got {row_2026}, expected BU({real_bu_2026['revenue_target']}) + "
+          f"BU2({real_bu2_2026['revenue_target']}) = {expected_2026}")
+
+    # 12e. Picking a specific BU or division scopes pursuits (and, by the
+    # same query, revenue/staffing) to that node and its descendants
+    # only -- not the caller's whole visible scope. AERO's real tree now
+    # has genuinely different content at every branch (BU holds nothing
+    # directly -- its 123 pursuits live under DIV1/DIV2/DIV3; BU2 holds
+    # 27 of its own, no divisions beneath it), so this is a real
+    # narrowing check against non-trivial data, not a tautology against
+    # empty siblings.
+    div1_id = next(o["id"] for o in a_opts if o["code"] == "DIV1")
+    div2_id = next(o["id"] for o in a_opts if o["code"] == "DIV2")
+    div3_id = next(o["id"] for o in a_opts if o["code"] == "DIV3")
+    r_root = safe(A.get, f"/api/bootstrap?scope_node_id={root_id}")
+    r_bu = safe(A.get, f"/api/bootstrap?scope_node_id={bu_id}")
+    r_bu2 = safe(A.get, f"/api/bootstrap?scope_node_id={bu2_id}")
+    r_div1 = safe(A.get, f"/api/bootstrap?scope_node_id={div1_id}")
+    n_root = len((r_root.json() or {}).get("pursuits") or []) if r_root.status_code == 200 else -1
+    n_bu = len((r_bu.json() or {}).get("pursuits") or []) if r_bu.status_code == 200 else -1
+    n_bu2 = len((r_bu2.json() or {}).get("pursuits") or []) if r_bu2.status_code == 200 else -1
+    n_div1 = len((r_div1.json() or {}).get("pursuits") or []) if r_div1.status_code == 200 else -1
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        real_counts = {r["code"]: r["n"] for r in db.execute("""
+            SELECT o.code, count(p.id) AS n FROM org_node o
+              LEFT JOIN pursuit p ON p.org_node_id = o.id AND p.is_active
+             WHERE o.client_id = (SELECT id FROM client WHERE code = 'AERO')
+             GROUP BY o.code""").fetchall()}
+    real_bu_rollup = real_counts.get("DIV1", 0) + real_counts.get("DIV2", 0) + real_counts.get("DIV3", 0)
+    check("selecting BU2 narrows the pursuit list to exactly BU2's own "
+          "real 27 pursuits, not the whole business's 150",
+          n_root == 150 and n_bu2 == real_counts.get("BU2", -1) and n_bu2 not in (0, 150),
+          f"root={n_root} bu2={n_bu2} (DB has {real_counts.get('BU2')} under BU2)")
+    check("BU's own rollup equals the SUM of its three divisions' real "
+          "pursuits (DIV1+DIV2+DIV3) -- BU holds none directly, so this "
+          "is genuinely a sum, not a single value that happens to match",
+          n_bu == real_bu_rollup and n_bu == 123,
+          f"got {n_bu}, expected DIV1({real_counts.get('DIV1')}) + "
+          f"DIV2({real_counts.get('DIV2')}) + DIV3({real_counts.get('DIV3')}) = {real_bu_rollup}")
+    check("selecting DIV1 alone shows only Sensors' own pursuits, not "
+          "Services' or Radios' (its siblings under the same BU)",
+          n_div1 == real_counts.get("DIV1", -1) and n_div1 != n_bu,
+          f"got {n_div1}, DB has {real_counts.get('DIV1')} under DIV1 alone")
+
+    # A malformed or out-of-scope scope_node_id must be rejected, not
+    # silently widened or narrowed to something arbitrary. demo_root was
+    # resolved back in section 9d.
+    r_bad = safe(A.get, f"/api/bootstrap?scope_node_id={demo_root['id']}")
+    check("an out-of-scope scope_node_id is rejected, not silently accepted",
+          r_bad.status_code in (403, 404), f"got {r_bad.status_code}: {r_bad.text[:150]}")
+
+    # ---- 13. pursuit org-unit picker -----------------------------------
+    print("\n=== 13. pursuit org-unit picker ===")
+
+    # 13a. The option list matches the CALLER's own visible scope -- a
+    # narrow-scoped user sees strictly fewer options than the full admin.
+    r = safe(A.get, "/api/bootstrap")
+    a_units = (r.json() or {}).get("org_units") or []
+    r = safe(N.get, "/api/bootstrap")
+    n_units = (r.json() or {}).get("org_units") or []
+    check("a narrow-scoped user's org-unit picker has fewer options than "
+          "a full-scope admin's, matching their own visible scope",
+          0 < len(n_units) < len(a_units),
+          f"admin={len(a_units)} narrow={len(n_units)}")
+    check("a BU with real divisions beneath it (BU) is never itself an "
+          "option -- only its divisions and leaf BUs are assignable",
+          not any(u["code"] == "BU" for u in a_units)
+          and any(u["code"] == "DIV1" for u in a_units)
+          and any(u["code"] == "BU2" for u in a_units),
+          f"got codes {[u['code'] for u in a_units]}")
+
+    # 13b. Submitting an org-unit code outside the caller's own
+    # ASSIGNABLE set is rejected, not silently accepted -- even a code
+    # that is visible to the caller in some other sense (AERO's own BU
+    # is in aero.admin's visible scope, but it has real divisions
+    # beneath it, so it is deliberately excluded from what's assignable).
+    r = safe(A.patch, f"/api/pursuits/{a_pursuit['id']}",
+             json={"org_unit_code": "BU"})
+    check("a code for a BU that has real divisions beneath it (not "
+          "assignable, even though visible) is rejected",
+          r.status_code in (400, 404), f"got {r.status_code}: {r.text[:150]}")
+    r = safe(A.patch, f"/api/pursuits/{a_pursuit['id']}",
+             json={"org_unit_code": "NO_SUCH_CODE_AT_ALL"})
+    check("an unknown org-unit code is rejected",
+          r.status_code in (400, 404), f"got {r.status_code}: {r.text[:150]}")
+
+    # 13c. A successful reassignment writes pursuit.org_node_id, is
+    # audited by the normal trigger (no special-casing), and the pursuit
+    # subsequently shows up under its new scope and not its old one.
+    # a_pursuit currently lives under DIV3; DV (aero.div1) is scoped to
+    # DIV1 and should NOT see it yet.
+    r = safe(DV.get, f"/api/pursuits/{a_pursuit['id']}")
+    check("before reassignment, a DIV1-scoped user cannot see a DIV3 pursuit",
+          r.status_code == 404, f"got {r.status_code}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        n_audit_before = db.execute(
+            "SELECT count(*) AS n FROM audit_log").fetchone()["n"]
+
+    r = safe(A.patch, f"/api/pursuits/{a_pursuit['id']}", json={"org_unit_code": "DIV1"})
+    check("reassigning to a code within the caller's own scope succeeds",
+          r.status_code == 200, f"got {r.status_code}: {r.text[:200]}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        div1_id = db.execute("""
+            SELECT o.id FROM org_node o JOIN client c ON c.id = o.client_id
+             WHERE c.code = 'AERO' AND o.code = 'DIV1'""").fetchone()["id"]
+        written = db.execute(
+            "SELECT org_node_id FROM pursuit WHERE id = %s", (a_pursuit["id"],)).fetchone()
+        n_audit_after = db.execute(
+            "SELECT count(*) AS n FROM audit_log").fetchone()["n"]
+        last_audit = db.execute("""
+            SELECT changed_fields FROM audit_log
+             WHERE table_name = 'pursuit' AND record_id = %s
+             ORDER BY occurred_at DESC LIMIT 1""", (a_pursuit["id"],)).fetchone()
+    check("the write landed on pursuit.org_node_id, DIV1's real id",
+          written is not None and str(written["org_node_id"]) == str(div1_id),
+          f"got {written}")
+    check("the reassignment is audited by the same trigger as any other "
+          "field -- no special-casing", n_audit_after > n_audit_before,
+          f"{n_audit_before} -> {n_audit_after}")
+    check("the audit row names org_node_id as a changed field",
+          bool(last_audit and "org_node_id" in (last_audit["changed_fields"] or {})),
+          f"recorded {list((last_audit or {}).get('changed_fields') or {})}")
+
+    r = safe(DV.get, f"/api/pursuits/{a_pursuit['id']}")
+    check("after reassignment, the DIV1-scoped user now sees it",
+          r.status_code == 200, f"got {r.status_code}")
+    r = safe(N.get, f"/api/pursuits/{a_pursuit['id']}")
+    check("a user scoped elsewhere (BU2) still cannot see it -- narrowing "
+          "did not accidentally widen anyone else's scope",
+          r.status_code == 404, f"got {r.status_code}")
+
+    # Restore via the real write path, per this project's standing
+    # discipline for any temporary test mutation to live data.
+    r = safe(A.patch, f"/api/pursuits/{a_pursuit['id']}", json={"org_unit_code": "DIV3"})
+    check("restoring the pursuit to its original org unit succeeds",
+          r.status_code == 200, f"got {r.status_code}: {r.text[:200]}")
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        restored = db.execute(
+            "SELECT org_node_id FROM pursuit WHERE id = %s", (a_pursuit["id"],)).fetchone()
+        div3_id = db.execute("""
+            SELECT o.id FROM org_node o JOIN client c ON c.id = o.client_id
+             WHERE c.code = 'AERO' AND o.code = 'DIV3'""").fetchone()["id"]
+    check("restore landed back on DIV3, the original org unit",
+          str(restored["org_node_id"]) == str(div3_id), f"got {restored}")
+
+    # ---- 14. test-fixture org nodes are hidden from pickers -----------
+    # BUZ ("Zero-Pursuit Test BU") exists ONLY to give the scope test
+    # suite a genuinely empty node. It must never appear as a choice in
+    # a real user's picker, but a user actually scoped to it (DZ) must
+    # still resolve correctly -- the flag hides it from being CHOSEN, it
+    # does not remove it from access control.
+    print("\n=== 14. test-fixture org nodes are hidden from pickers ===")
+
+    r = safe(A.get, "/api/bootstrap")
+    a_body = r.json() if r.status_code == 200 else {}
+    a_org_units = a_body.get("org_units") or []
+    a_scope_opts = (a_body.get("scope") or {}).get("options") or []
+    check("BUZ does not appear in the pursuit form's org-unit picker, "
+          "even though it is within aero.admin's visible scope",
+          not any(u.get("code") == "BUZ" for u in a_org_units),
+          f"got codes {[u.get('code') for u in a_org_units]}")
+    check("BUZ does not appear in the Dashboard's rollup selector",
+          not any(o.get("code") == "BUZ" for o in a_scope_opts),
+          f"got codes {[o.get('code') for o in a_scope_opts]}")
+
+    r = safe(A.get, "/api/plan-years")
+    py_body = r.json() if r.status_code == 200 else {}
+    py_candidates = py_body.get("candidates") or []
+    check("BUZ does not appear in the Targets & Budgets picker's "
+          "candidate list either",
+          not any(c.get("code") == "BUZ" for c in py_candidates),
+          f"got codes {[c.get('code') for c in py_candidates]}")
+
+    # A user actually scoped to BUZ (DZ = aero.buz) must still resolve
+    # correctly -- the flag is display-only, never an access-control
+    # mechanism. If this broke, DZ would see a 403/empty-scope error
+    # instead of a normal (empty-of-pursuits) bootstrap payload.
+    r = safe(DZ.get, "/api/bootstrap")
+    check("a user actually scoped to the test-fixture node still "
+          "resolves normally through the real scope machinery",
+          r.status_code == 200, f"got {r.status_code}: {r.text[:150]}")
+    dz_body = r.json() if r.status_code == 200 else {}
+    check("that user's own bootstrap still correctly reflects their real "
+          "scope (zero pursuits, since BUZ genuinely holds none)",
+          dz_body.get("pursuits") == [], f"got {dz_body.get('pursuits')}")
+
+    # ---- 15. client_escalation_rate write endpoint ---------------------
+    print("\n=== 15. client_escalation_rate write endpoint ===")
+    test_year5 = 2095   # implausible enough to never collide with real data
+
+    r = safe(N.put, f"/api/staffing/escalation-rates/{test_year5}", json={"rate": 0.05})
+    check("PUT as an unauthorized role (capture_manager) is rejected, "
+          "matching PUT /api/plan-years' own admin/executive gate",
+          r.status_code == 403, f"got {r.status_code}: {r.text[:150]}")
+
+    r = safe(A.put, f"/api/staffing/escalation-rates/{test_year5}", json={"rate": 0.07})
+    check("PUT as an authorized role (admin) succeeds",
+          r.status_code == 200, f"got {r.status_code}: {r.text[:150]}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        aero_row = db.execute("""
+            SELECT ce.client_id, ce.rate FROM client_escalation_rate ce
+              JOIN client c ON c.id = ce.client_id
+             WHERE c.code = 'AERO' AND ce.calendar_year = %s""", (test_year5,)).fetchone()
+        demo_row = db.execute("""
+            SELECT ce.client_id FROM client_escalation_rate ce
+              JOIN client c ON c.id = ce.client_id
+             WHERE c.code = 'DEMO' AND ce.calendar_year = %s""", (test_year5,)).fetchone()
+    check("the write landed on AERO's own client_escalation_rate row",
+          aero_row is not None and abs(float(aero_row["rate"]) - 0.07) < 1e-6,
+          f"got {aero_row}")
+    check("DEMO's tenant was not touched by AERO's write (tenant isolation)",
+          demo_row is None, f"got {demo_row}")
+
+    r = safe(B.get, "/api/staffing/escalation-rates")
+    b_rates = (r.json() or {}).get("rates") or []
+    check("DEMO's own GET does not see AERO's override for the test year "
+          "(RLS-scoped, same as every other tenant-scoped table)",
+          not any(row.get("calendar_year") == test_year5 for row in b_rates),
+          f"got {b_rates}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        db.execute("""
+            DELETE FROM client_escalation_rate
+             WHERE calendar_year = %s""", (test_year5,))
+        db.commit()
 
     print(f"\n{'='*58}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

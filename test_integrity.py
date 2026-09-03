@@ -348,16 +348,25 @@ def main():
                AND engine_secret_ref NOT LIKE 'arn:%%' LIMIT 20""")
 
         print("\n=== security invariants ===")
-        # Exactly two are expected and each is justified in its own file:
-        #   fn_lookup_login -- authentication must precede tenant resolution
-        #   fn_audit        -- an audit row must be writable even when the
-        #                      policy it is recording would block it
-        # A third appearing is a finding, not a feature.
+        # Exactly three are expected and each is justified in its own file:
+        #   fn_lookup_login       -- authentication must precede tenant
+        #                            resolution
+        #   fn_audit              -- an audit row must be writable even
+        #                            when the policy it is recording
+        #                            would block it
+        #   fn_list_active_clients -- the market sync job must enumerate
+        #                            every tenant before any of them has
+        #                            a tenant context to read through
+        #                            (ddl/16_market_sync.sql); returns
+        #                            only engine-identity columns, never
+        #                            pursuit or business data
+        # A fourth appearing is a finding, not a feature.
         check(cur, "no unexpected SECURITY DEFINER function", """
             SELECT p.proname FROM pg_proc p
               JOIN pg_namespace n ON n.oid = p.pronamespace
              WHERE n.nspname = 'public' AND p.prosecdef
-               AND p.proname NOT IN ('fn_lookup_login','fn_audit') LIMIT 20""")
+               AND p.proname NOT IN ('fn_lookup_login','fn_audit',
+                                     'fn_list_active_clients') LIMIT 20""")
 
         check(cur, "audit trigger is attached to pursuit", """
             SELECT 'missing' AS problem

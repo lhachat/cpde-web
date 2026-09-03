@@ -63,6 +63,21 @@ def cumulative_factor(target_year: int, base_year: int = ESCALATION_BASE_YEAR) -
     return factor
 
 
+def cumulative_factor_with_override(target_year: int, override_year: int,
+                                    override_rate: float,
+                                    base_year: int = ESCALATION_BASE_YEAR) -> float:
+    """Same formula, but one year's rate is a client override -- mirrors
+    resolve_escalation_rate's priority (exact-year client rate wins for
+    that year only, generic everywhere else)."""
+    if target_year <= base_year:
+        return 1.0
+    factor = 1.0
+    for yr in range(base_year, target_year):
+        rate = override_rate if yr == override_year else GENERIC_ESCALATION_RATES[yr]
+        factor *= 1.0 + rate
+    return factor
+
+
 # Known fixture, captured against the loaded AERO data before this feature
 # existed: GET /api/staffing/demand returned BDGEN (variable) at 2028-01 as
 # 2.02 (unescalated). This is a real, reproducible aggregate over the
@@ -133,6 +148,98 @@ def main():
               "escalation is unapplied",
               "ESCALATION NOT APPLIED" not in (body.get("phasing") or ""),
               body.get("phasing"))
+
+    # ---- client_escalation_rate write endpoint -------------------------
+    print(f"\n=== PUT /api/staffing/escalation-rates/{{year}} ===")
+    OVERRIDE_YEAR = 2027   # an intermediate year in the 2026->2028 compound
+    OVERRIDE_RATE = 0.10   # deliberately far from the generic 0.054 for 2027
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        pre_existing = db.execute("""
+            SELECT rate FROM client_escalation_rate ce JOIN client c ON c.id = ce.client_id
+             WHERE c.code = 'AERO' AND ce.calendar_year = %s""", (OVERRIDE_YEAR,)).fetchone()
+    check("no override exists yet for the test year -- confirms the "
+          "BEFORE state really is the plain generic-table baseline",
+          pre_existing is None, f"got {pre_existing}")
+
+    # 1. No override -> generic rate table, i.e. the KNOWN_EXPECTED_ESCALATED
+    # check already run above IS this proof (ran before any PUT below).
+
+    # 5. An implausible rate is rejected before it ever reaches the table.
+    r_bad = c.put(f"/api/staffing/escalation-rates/{OVERRIDE_YEAR}", json={"rate": 5.0})
+    check("an implausible rate (5.0 = 500%) is rejected",
+          r_bad.status_code in (400, 422), f"got {r_bad.status_code}: {r_bad.text[:150]}")
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        still_none = db.execute("""
+            SELECT rate FROM client_escalation_rate ce JOIN client c ON c.id = ce.client_id
+             WHERE c.code = 'AERO' AND ce.calendar_year = %s""", (OVERRIDE_YEAR,)).fetchone()
+    check("the rejected rate was never written", still_none is None, f"got {still_none}")
+
+    # 2. A real override, PUT as an authorized role, persists AND is
+    # actually consumed by the next staffing calculation -- not just
+    # stored. Same BDGEN/2028-01 fixture as above, hand-recomputed with
+    # 2027 overridden instead of generic.
+    r_put = c.put(f"/api/staffing/escalation-rates/{OVERRIDE_YEAR}",
+                  json={"rate": OVERRIDE_RATE})
+    check("PUT with a plausible rate as an authorized role succeeds",
+          r_put.status_code == 200, f"got {r_put.status_code}: {r_put.text[:200]}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        written = db.execute("""
+            SELECT rate FROM client_escalation_rate ce JOIN client c ON c.id = ce.client_id
+             WHERE c.code = 'AERO' AND ce.calendar_year = %s""", (OVERRIDE_YEAR,)).fetchone()
+    check("the override rate was written to client_escalation_rate",
+          written is not None and abs(float(written["rate"]) - OVERRIDE_RATE) < 1e-6,
+          f"got {written}")
+
+    expected_after_override = round(
+        KNOWN_UNESCALATED / cumulative_factor_with_override(
+            2028, OVERRIDE_YEAR, OVERRIDE_RATE), 2)
+    print(f"  expected AFTER override (2027 -> {OVERRIDE_RATE}): "
+          f"{expected_after_override} (was {KNOWN_EXPECTED_ESCALATED})")
+    r2 = c.get("/api/staffing/demand")
+    body2 = r2.json()
+    months2, demand2 = body2.get("months", []), body2.get("demand", {})
+    if KNOWN_MONTH in months2 and KNOWN_CATEGORY in demand2:
+        idx2 = months2.index(KNOWN_MONTH)
+        actual_after = demand2[KNOWN_CATEGORY][idx2]
+        print(f"  actual API value AFTER override: {actual_after}")
+        # Escalation is applied per-pursuit (each contribution divided by
+        # the same cumulative factor) THEN summed, whereas this hand
+        # check divides the already-summed 2.02 once -- mathematically
+        # equal, but floating-point summation order can land a shared
+        # two-decimal rounding a single cent apart. 0.02 still proves
+        # real consumption (a wrong/unconsumed override would be off by
+        # far more) without being sensitive to that summation-order noise.
+        check(f"{KNOWN_CATEGORY} {KNOWN_MONTH} reflects the override -- "
+              "the calculation actually CONSUMES it, not just stores it",
+              abs(actual_after - expected_after_override) < 0.02,
+              f"got {actual_after}, expected {expected_after_override}")
+        check("the override genuinely changed the result (not a "
+              "coincidental match with the un-overridden value)",
+              abs(actual_after - KNOWN_EXPECTED_ESCALATED) > 0.01,
+              f"before={KNOWN_EXPECTED_ESCALATED} after={actual_after}")
+    else:
+        check(f"{KNOWN_CATEGORY}/{KNOWN_MONTH} present after override", False,
+              "fixture month/category missing")
+
+    # Clean up -- this row never existed before this test run.
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        db.execute("""
+            DELETE FROM client_escalation_rate
+             WHERE client_id = (SELECT id FROM client WHERE code = 'AERO')
+               AND calendar_year = %s""", (OVERRIDE_YEAR,))
+        db.commit()
+    r3 = c.get("/api/staffing/demand")
+    body3 = r3.json()
+    months3, demand3 = body3.get("months", []), body3.get("demand", {})
+    if KNOWN_MONTH in months3 and KNOWN_CATEGORY in demand3:
+        idx3 = months3.index(KNOWN_MONTH)
+        restored = demand3[KNOWN_CATEGORY][idx3]
+        check("after cleanup, the calculation reverts to the original "
+              "un-overridden value",
+              abs(restored - KNOWN_EXPECTED_ESCALATED) < 0.01,
+              f"got {restored}, expected {KNOWN_EXPECTED_ESCALATED}")
 
     print(f"\n{'='*58}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

@@ -17,11 +17,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
-from ..plan_scope import resolve_license_boundary_nodes
+from ..plan_scope import (assignable_pursuit_org_nodes, dashboard_scope_node_ids,
+                          dashboard_scope_options, exclude_test_fixtures,
+                          resolve_dashboard_node, resolve_license_boundary_nodes)
 from .staffing import (_pursuit_filter, apply_cutoff, client_escalation_rates,
                        compute_phase_dates, monthly_contributions)
 
@@ -31,9 +33,28 @@ SCOPED = "p.id IN (SELECT pursuit_id FROM fn_user_pursuits(%s))"
 
 
 @router.get("/bootstrap")
-async def bootstrap(p: Principal = Depends(current_principal)):
+async def bootstrap(scope_node_id: str | None = Query(default=None),
+                    p: Principal = Depends(current_principal)):
     with tenant_tx(p.client_id) as cur:
         client = fetch_one(cur, "SELECT code, name FROM client LIMIT 1")
+
+        # The Dashboard's own hierarchical scope selector -- a SEPARATE
+        # concept from the license-boundary resolution below. Defaults to
+        # the caller's own highest assigned node, i.e. their full scope,
+        # summed -- so the Dashboard shows real numbers before anyone
+        # touches the selector. `scope` node ids narrow pursuits, year
+        # projections, staffing and the rollup target figures together;
+        # Targets & Budgets' own `targets`/`target_org_nodes` below are
+        # untouched by this and keep their existing, separate semantics.
+        dash_node_id = resolve_dashboard_node(cur, p.user_id, scope_node_id)
+        dash_scope_ids = dashboard_scope_node_ids(cur, dash_node_id)
+
+        # The pursuit edit form's org-unit picker: every node this caller
+        # could reassign a pursuit to. A THIRD independent scope concept
+        # (see plan_scope.py) -- not the Dashboard rollup selection above,
+        # not the Targets & Budgets license-boundary picker.
+        org_units = assignable_pursuit_org_nodes(cur, p.user_id)
+        dash_options = dashboard_scope_options(cur, p.user_id)
 
         # Previously this queried every visible org node at once, with no
         # way to tell which business unit a row belonged to -- silently
@@ -44,6 +65,10 @@ async def bootstrap(p: Principal = Depends(current_principal)):
         # present merged/arbitrary numbers as if they were real.
         plan_org_nodes = resolve_license_boundary_nodes(cur, p.user_id)
         plan_node_id = plan_org_nodes[0]["id"] if len(plan_org_nodes) == 1 else None
+        # DISPLAY-only view of the same candidates, test fixtures hidden.
+        # Used only for the target_org_nodes picker list below -- never
+        # for plan_node_id/plan (real data resolution stays unfiltered).
+        _displayable_plan_nodes = exclude_test_fixtures(plan_org_nodes)
         plan = []
         if plan_node_id:
             plan = fetch_all(cur, """
@@ -74,7 +99,8 @@ async def bootstrap(p: Principal = Depends(current_principal)):
                    d.external_opportunity_id AS dep_opp_id,
                    d.name AS dep_name,
                    p.updated_at, ub.email AS updated_by_email,
-                   ub.display_name AS updated_by_name
+                   ub.display_name AS updated_by_name,
+                   org.code AS org_unit_code, org.name AS org_unit_name
               FROM pursuit p
               LEFT JOIN app_user ub ON ub.id = p.updated_by
               LEFT JOIN market m ON m.id = p.market_id
@@ -84,9 +110,11 @@ async def bootstrap(p: Principal = Depends(current_principal)):
               LEFT JOIN pwin_assessment a ON a.pursuit_id = p.id
                     AND a.scenario = 'BASE' AND a.is_current
               LEFT JOIN pursuit d ON d.id = p.depends_on_pursuit_id
+              LEFT JOIN org_node org ON org.id = p.org_node_id
              WHERE {SCOPED} AND p.is_active
+               AND p.org_node_id = ANY(%s::uuid[])
              ORDER BY p.planned_total_award_value DESC NULLS LAST""",
-            (p.user_id,))
+            (p.user_id, dash_scope_ids))
 
         years = fetch_all(cur, f"""
             SELECT yp.pursuit_id, yp.year_offset AS y, yp.calendar_year,
@@ -95,7 +123,8 @@ async def bootstrap(p: Principal = Depends(current_principal)):
               FROM pursuit_year_projection yp
               JOIN pursuit p ON p.id = yp.pursuit_id
              WHERE {SCOPED}
-             ORDER BY yp.pursuit_id, yp.year_offset""", (p.user_id,))
+               AND p.org_node_id = ANY(%s::uuid[])
+             ORDER BY yp.pursuit_id, yp.year_offset""", (p.user_id, dash_scope_ids))
 
         # Questionnaire answers must stay visible even after a Black Hat or
         # PTW submission takes over as the pursuit's current assessment --
@@ -112,12 +141,13 @@ async def bootstrap(p: Principal = Depends(current_principal)):
               LEFT JOIN question_option o ON o.id = w.question_option_id
              WHERE {SCOPED} AND a.scenario = 'BASE'
                AND a.assessment_type = 'QUESTIONNAIRE'
+               AND p.org_node_id = ANY(%s::uuid[])
                AND a.id = (SELECT id FROM pwin_assessment a2
                             WHERE a2.pursuit_id = a.pursuit_id
                               AND a2.scenario = 'BASE'
                               AND a2.assessment_type = 'QUESTIONNAIRE'
                             ORDER BY a2.calculated_at DESC LIMIT 1)""",
-            (p.user_id,))
+            (p.user_id, dash_scope_ids))
 
         staff_rows = fetch_all(cur, f"""
             SELECT p.id AS pursuit_id, p.proposal_due_date, p.cancel_date,
@@ -131,8 +161,22 @@ async def bootstrap(p: Principal = Depends(current_principal)):
               LEFT JOIN pursuit_phase_duration d
                      ON d.pursuit_id = s.pursuit_id AND d.phase_id = s.phase_id
              WHERE {SCOPED} AND {_pursuit_filter(False)}
-               AND s.fte > 0 AND p.proposal_due_date IS NOT NULL""",
-            (p.user_id,))
+               AND s.fte > 0 AND p.proposal_due_date IS NOT NULL
+               AND p.org_node_id = ANY(%s::uuid[])""",
+            (p.user_id, dash_scope_ids))
+
+        scope_targets = fetch_all(cur, """
+            SELECT y.calendar_year AS year,
+                   SUM(y.revenue_target) AS rev_target,
+                   SUM(y.fee_target) AS fee_target,
+                   SUM(y.budgeted_bp) AS bp_budget,
+                   SUM(y.budgeted_investment) AS inv_budget,
+                   SUM(y.current_contract_revenue) AS other_rev,
+                   SUM(y.current_contract_fee) AS other_fee
+              FROM plan_year y
+             WHERE y.org_node_id = ANY(%s::uuid[])
+             GROUP BY y.calendar_year
+             ORDER BY y.calendar_year""", (dash_scope_ids,))
         escalation_rates = client_escalation_rates(cur)
 
     # --- attach year projections, and derive total B&P per pursuit ---
@@ -242,12 +286,28 @@ async def bootstrap(p: Principal = Depends(current_principal)):
         "planning_year": plan_start,
         "targets": plan,
         # Present whenever the caller's scope covers more than one
-        # license-boundary BU -- the Targets & Budgets view uses this to
-        # show a picker instead of the (empty, above) targets directly.
-        # Empty for a single-BU user; nothing changes for them.
-        "target_org_nodes": [{"id": str(n["id"]), "code": n["code"],
-                              "name": n["name"]} for n in plan_org_nodes]
-                            if len(plan_org_nodes) > 1 else [],
+        # DISPLAYABLE license-boundary BU -- the Targets & Budgets view
+        # uses this to show a picker instead of the (empty, above)
+        # targets directly. Empty for a single-BU user; nothing changes
+        # for them. Filtered through exclude_test_fixtures here, at the
+        # DISPLAY boundary only -- plan_org_nodes/plan_node_id above stay
+        # unfiltered, so a genuinely test-fixture-scoped user's own
+        # targets keep working even though this list never shows it.
+        "target_org_nodes": ([{"id": str(n["id"]), "code": n["code"],
+                               "name": n["name"]} for n in _displayable_plan_nodes]
+                             if len(_displayable_plan_nodes) > 1 else []),
         "pursuits": out,
         "staffing": staffing,
+        # The Dashboard's own scope selector: current selection (defaults
+        # to the caller's full assigned scope) plus every node it may be
+        # switched to, and the rollup-summed target figures for whatever
+        # is currently selected. Independent of targets/target_org_nodes
+        # above -- Targets & Budgets edits one license-boundary BU's own
+        # row; this only ever sums and displays.
+        "scope": {
+            "current_org_node_id": dash_node_id,
+            "options": dash_options,
+        },
+        "scope_targets": scope_targets,
+        "org_units": org_units,
     }

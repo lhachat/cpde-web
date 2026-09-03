@@ -377,6 +377,13 @@ let OPEN=P.filter(x=>!x.outcome);
 let DECIDED=P.filter(x=>x.outcome);
 /* editable targets */
 const TG={};
+// Dashboard-family (dash/revenue/bp/pursuits) read-only rollup targets,
+// keyed by year -- separate from TG on purpose. TG is Targets & Budgets'
+// own editable view of exactly one license-boundary BU's own plan_year
+// row; DTG is whatever the Dashboard scope selector currently has
+// picked (a node plus everything beneath it, summed). Different
+// granularity, different rules -- see plan_scope.py's own note on this.
+const DTG={};
 
 // The ONE accessor for a pursuit's year-N figures. The API pads years to
 // 5 dense entries, but that is a contract worth verifying, not one worth
@@ -531,6 +538,14 @@ const outPill=o=>o?`<span class="pill ${o==='Won'?'p-won':o==='Lost'?'p-lost':'p
 
 /* ---------- year selector ---------- */
 let selYear=PY;
+// Which org node the Dashboard-family views (dash/revenue/bp/pursuits)
+// are currently scoped to. null means "let the server default to the
+// caller's own full assigned scope" -- loadData() re-syncs this from
+// whatever the server actually resolved on every load, so it can never
+// silently drift from what D.scope.current_org_node_id says. Separate
+// from selectedTargetOrgNode -- Targets & Budgets edits one
+// license-boundary BU's own row; this only ever views a rollup.
+let selectedScopeNodeId = null;
 let staffWinStart = null;   // start year of the 5-year staffing window.
 // null means "not yet chosen" -- vStaffing() defaults it to the current
 // planning year the first time it renders. Setting it eagerly here would
@@ -547,19 +562,30 @@ function tools(v){
     // whatever is in the pipeline, without landing on an all-empty window.
     const opts=[]; for(let y=lo;y<=hi;y++) opts.push(y);
     $('#tools').innerHTML=`<span style="font-size:11px;color:#888">5-year window from</span>
-      <select id="stSel">${opts.map(y=>`<option ${y===staffWinStart?'selected':''}>${y}</option>`).join('')}</select>
-      <span class="chip on">Demo Business</span><span class="chip">Demo BU</span>`;
+      <select id="stSel">${opts.map(y=>`<option ${y===staffWinStart?'selected':''}>${y}</option>`).join('')}</select>`;
     $('#stSel').onchange=e=>{staffWinStart=+e.target.value;vStaffing();};
     return;
   }
   if(v==='dash'||v==='revenue'||v==='bp'||v==='pursuits'){
+    const opts=(D.scope&&D.scope.options)||[];
+    // Same convention as the Targets picker: a single option (nothing to
+    // choose between) means no selector, not a picker of one.
+    const scopePicker = opts.length>1 ? `<select id="scopeSel">
+      ${opts.map(o=>`<option value="${o.id}" ${o.id===selectedScopeNodeId?'selected':''}>
+        ${o.name} (${o.kind==='rollup'?'Rollup':o.code})</option>`).join('')}
+      </select>` : '';
     $('#tools').innerHTML=`<span style="font-size:11px;color:#888">Year</span>
       <select id="ySel">${YRS.map(y=>`<option ${y===selYear?'selected':''}>${y}</option>`).join('')}</select>
-      ${v==='dash'?'<span class="chip" id="cfgBtn">&#9881; Configure</span>':''}
-      <span class="chip on">Demo Business</span><span class="chip">Demo BU</span>`;
+      ${scopePicker}
+      ${v==='dash'?'<span class="chip" id="cfgBtn">&#9881; Configure</span>':''}`;
     $('#ySel').onchange=e=>{selYear=+e.target.value;render();};
+    const ss=$('#scopeSel');
+    if(ss) ss.onchange=async e=>{
+      selectedScopeNodeId = e.target.value;
+      if(await loadData()){ render(); show(cur); }
+    };
     const cb=$('#cfgBtn'); if(cb) cb.onclick=()=>{cfgOpen=!cfgOpen;vDash();};
-  } else $('#tools').innerHTML=`<span class="chip on">Demo Business</span><span class="chip">Demo BU</span>`;
+  } else $('#tools').innerHTML='';
 }
 
 
@@ -667,7 +693,7 @@ function chartOrTable(key,series,labels,colors,names){
 
 /* ---------- Dashboard ---------- */
 function vDash(){
-  const i=YRS.indexOf(selYear), a=yearAgg(listFor(),i), t=TG[selYear];
+  const i=YRS.indexOf(selYear), a=yearAgg(listFor(),i), t=DTG[selYear];
   const gap=a.rev-(t.rev_target||0), bpv=(t.bp_budget||0)-a.bp, ivv=(t.inv_budget||0)-a.inv;
   const cls=v=>v>=0?'up':'dn', sgn=v=>(v>=0?'+':'')+M(v);
   const grp=(key,list)=>{const m={};list.forEach(x=>{const k=x[key]||'\u2014';
@@ -682,8 +708,8 @@ function vDash(){
   const wv=sum(DECIDED.filter(x=>x.outcome==='Won'),x=>x.value), lv=sum(DECIDED.filter(x=>x.outcome==='Lost'),x=>x.value);
   const wrV=wv+lv?wv/(wv+lv):null;
   const bid=P.filter(x=>x.bid==='Bid').length, nobid=P.filter(x=>x.bid==='No Bid').length;
-  const revS=[{name:'Target',v:YRS.map(y=>TG[y].rev_target||0)},{name:'Probabilistic',v:byYear().map(r=>r.rev)}];
-  const bpS=[{name:'Budget',v:YRS.map(y=>TG[y].bp_budget||0)},{name:'Required',v:byYear().map(r=>r.bp)}];
+  const revS=[{name:'Target',v:YRS.map(y=>DTG[y].rev_target||0)},{name:'Probabilistic',v:byYear().map(r=>r.rev)}];
+  const bpS=[{name:'Budget',v:YRS.map(y=>DTG[y].bp_budget||0)},{name:'Required',v:byYear().map(r=>r.bp)}];
   const C=DASH_CFG, SHOW=(k,html)=>C[k].on?html:'';
   $('#dash').innerHTML=cfgPanel()+`
   <div class="kpis">
@@ -737,7 +763,7 @@ function vDash(){
      ${chartOrTable('bp',bpS,YRS,['#B8B8B8','#8A6A17'],['Budget','Required'])}
      <div class="note">${selYear} requires ${M(a.bp)} against ${M(t.bp_budget||0)} budgeted \u2014 ${bpv>=0?'within budget':'<b>over by '+M(-bpv)+'</b>'}.</div></div>`)}
    ${SHOW('invchart',`<div class="card"><h3>Investment \u2014 planned vs. budget</h3>
-     ${chartOrTable('invchart',[{name:'Budget',v:YRS.map(y=>TG[y].inv_budget||0)},{name:'Planned',v:byYear().map(r=>r.inv)}],YRS,['#B8B8B8','#3B6D11'],['Investment budget','Planned investment'])}</div>`)}
+     ${chartOrTable('invchart',[{name:'Budget',v:YRS.map(y=>DTG[y].inv_budget||0)},{name:'Planned',v:byYear().map(r=>r.inv)}],YRS,['#B8B8B8','#3B6D11'],['Investment budget','Planned investment'])}</div>`)}
   </div>
   <div class="grid g2">
    ${SHOW('market',`<div class="card"><h3>Revenue by market</h3>
@@ -749,14 +775,14 @@ function vDash(){
   ${SHOW('invtable',`<div class="card"><h3>Investment by year</h3>
     <div class="tw"><table><thead><tr><th>Year</th><th class="r">Budget</th><th class="r">Planned</th>
       <th class="r">Variance</th><th class="r">Pursuits</th></tr></thead>
-    <tbody>${YRS.map((y,i)=>{const g=yearAgg(OPEN,i),t2=TG[y],v=(t2.inv_budget||0)-g.inv;
+    <tbody>${YRS.map((y,i)=>{const g=yearAgg(OPEN,i),t2=DTG[y],v=(t2.inv_budget||0)-g.inv;
       const n=listFor().filter(x=>yearOf(x,i).inv>0).length;
       return `<tr${y===selYear?' class="sel"':''}><td class="num">${y}</td><td class="r num">${money(t2.inv_budget||0)}</td>
       <td class="r num">${money(g.inv)}</td><td class="r num" style="color:${v>=0?'#3B6D11':'#8C2F27'}">${v>=0?'+':''}${money(v)}</td>
       <td class="r num">${n}</td></tr>`;}).join('')}
-    </tbody><tfoot><tr><td>Total</td><td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0))}</td>
+    </tbody><tfoot><tr><td>Total</td><td class="r num">${money(sum(YRS,y=>DTG[y].inv_budget||0))}</td>
       <td class="r num">${money(sum(byYear(),r=>r.inv))}</td>
-      <td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0)-sum(byYear(),r=>r.inv))}</td><td></td></tr></tfoot></table></div></div>`)}`;
+      <td class="r num">${money(sum(YRS,y=>DTG[y].inv_budget||0)-sum(byYear(),r=>r.inv))}</td><td></td></tr></tfoot></table></div></div>`)}`;
   $$('#dash [data-cfg]').forEach(c=>c.onchange=e=>{DASH_CFG[e.target.dataset.cfg].on=e.target.checked;vDash();});
   $$('#dash [data-cfgt]').forEach(s=>s.onchange=e=>{DASH_CFG[e.target.dataset.cfgt].type=e.target.value;vDash();});
   const cd=$('#cfgDone'); if(cd) cd.onclick=()=>{cfgOpen=false;vDash();};
@@ -828,7 +854,7 @@ function vPursuits(){
   const fob=fo.filter(x=>isBid(x.uid));
   const sel=(id,lbl,opts,val)=>`<label>${lbl}</label><select data-f="${id}">
     <option value="">All</option>${opts.map(o=>`<option value="${o[0]}" ${val===o[0]?'selected':''}>${o[1]}</option>`).join('')}</select>`;
-  const i0=YRS.indexOf(selYear), t=TG[selYear];
+  const i0=YRS.indexOf(selYear), t=DTG[selYear];
   const ag=yearAgg(listFor(),i0);
   const bpVar=(t.bp_budget||0)-ag.bp, revVar=ag.rev-(t.rev_target||0);
   const invVar=(t.inv_budget||0)-ag.inv;
@@ -1094,6 +1120,9 @@ function detailView(uid){
              <span class="num">${r.opp_id??'\u2014'}</span>
              <span class="lockwhy" title="This is the key CRM import matches on. Only an administrator can change it.">admin only</span>
            </div></div>`}
+      ${fieldRow({...r, org_unit:r.org_unit_code},'org_unit','Business unit / division',
+        {type:'select',options:(D.org_units||[]).map(u=>({code:u.code,label:u.path.join(' | ')})),
+         note:'Only nodes you have scope over are listed. A division-holding BU is never an option \u2014 pick the specific division instead.'})}
       ${fieldRow(r,'market','Market',{type:'select',options:(REF?REF.markets:[]).map(m=>({code:m.code,label:`${m.code} \u2014 ${m.name}`}))})}
       ${fieldRow({...r, type:(REF?(REF.opportunity_types.find(o=>o.label===r.type)||{}).code:null)},'type','Opportunity type',{type:'select',options:(REF?REF.opportunity_types:[]),note:'Changing this swaps the TM1a/TM1b question set \u2014 existing answers may need revisiting'})}
       ${fieldRow({...r, contract:(REF?(REF.contract_types.find(o=>o.label===r.contract)||{}).code:null)},'contract','Contract type',{type:'select',options:(REF?REF.contract_types:[]),note:'Sets the nominal fee rate'})}
@@ -1575,8 +1604,8 @@ function vStaffing(){
 /* ---------- Revenue ---------- */
 function vRevenue(){
   const by=byYear();
-  const revS=[{name:'Target',v:YRS.map(y=>TG[y].rev_target||0)},{name:'Probabilistic',v:by.map(r=>r.rev)}];
-  const feeS=[{name:'Target',v:YRS.map(y=>TG[y].fee_target||0)},{name:'Probabilistic',v:by.map(r=>r.fee)}];
+  const revS=[{name:'Target',v:YRS.map(y=>DTG[y].rev_target||0)},{name:'Probabilistic',v:by.map(r=>r.rev)}];
+  const feeS=[{name:'Target',v:YRS.map(y=>DTG[y].fee_target||0)},{name:'Probabilistic',v:by.map(r=>r.fee)}];
   $('#revenue').innerHTML=`
   <div class="grid g2">
    <div class="card"><h3>Revenue \u2014 probabilistic vs. target</h3>${barsGrouped(revS,YRS,['#B8B8B8','#3B6D11'])}${legend(['Target','Probabilistic'],['#B8B8B8','#3B6D11'])}</div>
@@ -1585,15 +1614,15 @@ function vRevenue(){
   <div class="card"><h3>Projection detail</h3>
    <div class="tw"><table><thead><tr><th>Year</th><th class="r">Revenue target</th><th class="r">Probabilistic revenue</th>
      <th class="r">Gap</th><th class="r">Fee target</th><th class="r">Probabilistic fee</th><th class="r">Gap</th></tr></thead>
-   <tbody>${by.map((r,i)=>{const t=TG[YRS[i]],gr=r.rev-(t.rev_target||0),gf=r.fee-(t.fee_target||0);
+   <tbody>${by.map((r,i)=>{const t=DTG[YRS[i]],gr=r.rev-(t.rev_target||0),gf=r.fee-(t.fee_target||0);
      const c=v=>v>=0?'color:#3B6D11':'color:#8C2F27';
      return `<tr${YRS[i]===selYear?' class="sel"':''}><td class="num">${r.y}</td><td class="r num">${money(t.rev_target||0)}</td>
        <td class="r num">${money(r.rev)}</td><td class="r num" style="${c(gr)}">${gr>=0?'+':''}${money(gr)}</td>
        <td class="r num">${money(t.fee_target||0)}</td><td class="r num">${money(r.fee)}</td>
        <td class="r num" style="${c(gf)}">${gf>=0?'+':''}${money(gf)}</td></tr>`;}).join('')}
-   </tbody><tfoot><tr><td>Total</td><td class="r num">${money(sum(YRS,y=>TG[y].rev_target||0))}</td>
+   </tbody><tfoot><tr><td>Total</td><td class="r num">${money(sum(YRS,y=>DTG[y].rev_target||0))}</td>
      <td class="r num">${money(sum(by,r=>r.rev))}</td><td class="r num"></td>
-     <td class="r num">${money(sum(YRS,y=>TG[y].fee_target||0))}</td><td class="r num">${money(sum(by,r=>r.fee))}</td>
+     <td class="r num">${money(sum(YRS,y=>DTG[y].fee_target||0))}</td><td class="r num">${money(sum(by,r=>r.fee))}</td>
      <td class="r num"></td></tr></tfoot></table></div>
    <div class="note">Every year counts open and closed pursuits marked Bid \u2014 the question is
      whether the plan is being met, and won work is the largest part of the near years.
@@ -1604,11 +1633,11 @@ function vRevenue(){
 /* ---------- B&P ---------- */
 function vBP(){
   const by=byYear();
-  const bpS=[{name:'Budget',v:YRS.map(y=>TG[y].bp_budget||0)},{name:'Required',v:by.map(r=>r.bp)}];
-  const ivS=[{name:'Budget',v:YRS.map(y=>TG[y].inv_budget||0)},{name:'Planned',v:by.map(r=>r.inv)}];
+  const bpS=[{name:'Budget',v:YRS.map(y=>DTG[y].bp_budget||0)},{name:'Required',v:by.map(r=>r.bp)}];
+  const ivS=[{name:'Budget',v:YRS.map(y=>DTG[y].inv_budget||0)},{name:'Planned',v:by.map(r=>r.inv)}];
   const top=[...OPEN].sort((a,b)=>b.bp-a.bp).slice(0,12);
   const inv=[...OPEN].filter(x=>x.inv>0).sort((a,b)=>b.inv-a.inv).slice(0,12);
-  const invTot=sum(OPEN,x=>x.inv), invBud=sum(YRS,y=>TG[y].inv_budget||0);
+  const invTot=sum(OPEN,x=>x.inv), invBud=sum(YRS,y=>DTG[y].inv_budget||0);
   $('#bp').innerHTML=`
   <div class="grid g2">
    <div class="card"><h3>B&amp;P \u2014 required vs. budget</h3>${barsGrouped(bpS,YRS,['#B8B8B8','#8A6A17'])}${legend(['Budget','Required'],['#B8B8B8','#8A6A17'])}</div>
@@ -1617,7 +1646,7 @@ function vBP(){
   <div class="card"><h3>Budget position by year</h3>
    <div class="tw"><table><thead><tr><th>Year</th><th class="r">B&amp;P budget</th><th class="r">B&amp;P required</th>
      <th class="r">Variance</th><th class="r">Investment budget</th><th class="r">Investment planned</th><th class="r">Variance</th></tr></thead>
-   <tbody>${by.map((r,i)=>{const t=TG[YRS[i]],vb=(t.bp_budget||0)-r.bp,vi=(t.inv_budget||0)-r.inv;
+   <tbody>${by.map((r,i)=>{const t=DTG[YRS[i]],vb=(t.bp_budget||0)-r.bp,vi=(t.inv_budget||0)-r.inv;
      const c=v=>v>=0?'color:#3B6D11':'color:#8C2F27';
      return `<tr${YRS[i]===selYear?' class="sel"':''}><td class="num">${r.y}</td><td class="r num">${money(t.bp_budget||0)}</td>
        <td class="r num">${money(r.bp)}</td><td class="r num" style="${c(vb)}">${vb>=0?'+':''}${money(vb)}</td>
@@ -1768,7 +1797,8 @@ async function saveTargets(){
   }catch(e){ toast(`Could not save: ${e.message}`, true); }
 }
 function vTargets(){
-  if((D.target_org_nodes||[]).length && !selectedTargetOrgNode){
+  const multiScope = (D.target_org_nodes||[]).length;
+  if(multiScope && !selectedTargetOrgNode){
     // Ambiguous scope, per plan_scope.py's resolver -- show a picker
     // instead of a blind failure or silently-merged data. A single-BU
     // user never reaches this branch at all (D.target_org_nodes is
@@ -1789,10 +1819,28 @@ function vTargets(){
     };
     return;
   }
+  // Visible confirmation of which scope is showing, plus a way back to
+  // the picker -- without this, a multi-BU user has no on-screen signal
+  // their pick took effect (a real gap that shipped once already: the
+  // internal state updated correctly but nothing on screen said so).
+  const scopeBanner = multiScope ? `<div class="pad" style="display:flex;
+    align-items:center;gap:10px;border-bottom:1px solid var(--line)">
+    <span style="font-size:11px;color:#888">Viewing</span>
+    <b id="tgScopeName">${selectedTargetOrgNode.name} (${selectedTargetOrgNode.code})</b>
+    <a href="#" id="tgChangeScope" style="font-size:12px">Change</a>
+    </div>` : '';
+  const wireChangeScope = ()=>{
+    if(!multiScope) return;
+    $('#tgChangeScope').onclick = e=>{
+      e.preventDefault();
+      selectedTargetOrgNode = null; targetBuf = {}; vTargets();
+    };
+  };
   if(!Object.keys(TG).length){
-    $('#targets').innerHTML = `<div class="card"><h3>Targets &amp; budgets</h3>
+    $('#targets').innerHTML = `${scopeBanner}<div class="card"><h3>Targets &amp; budgets</h3>
       <div class="pad"><p style="margin:0">No annual plan has been set for the
       business unit assigned to this account.</p></div></div>`;
+    wireChangeScope();
     return;
   }
   const editable = canEditTargets();
@@ -1806,6 +1854,7 @@ function vTargets(){
         ${isDirty(y,f)?'style="background:var(--accent-tint)"':''}>`
     : `<span class="num">${f==='esc' ? (TG[y][f]||0) : money(TG[y][f]||0)}</span>`;
   $('#targets').innerHTML=`
+  ${scopeBanner}
   <div class="flag">Targets and budgets drive every variance shown elsewhere.${
     editable ? ' Edits require Save.' : ''}</div>
   <div id="tgBarSlot"></div>
@@ -1828,6 +1877,7 @@ function vTargets(){
      <td class="r num">${money(sum(YRS,y=>TG[y].inv_budget||0))}</td></tr></tfoot></table></div>
    <div class="note">In the workbook these live on the Dashboard sheet. Here they are per business unit
      and per planning year, so a division and its parent can hold different plans.</div></div>`;
+  wireChangeScope();
   refreshTargetBar();
   // DO NOT re-render the whole view on change -- clicking Save blurs the
   // input, which fires change, which would rebuild the table and destroy
@@ -2222,7 +2272,7 @@ window.showHelp = function(code, type){
    read-only WITH THE REASON -- a greyed-out box with no explanation reads
    as broken rather than as intentional. */
 const UI_TO_API = {name:'name', opp_id:'external_opportunity_id',
-  market:'market_code', type:'opportunity_type_code',
+  org_unit:'org_unit_code', market:'market_code', type:'opportunity_type_code',
   contract:'contract_type_code', stage:'pipeline_stage_code',
   sole:'is_sole_source', bidders:'bidders',
   value:'planned_total_award_value', due:'proposal_due_date',
@@ -2651,6 +2701,14 @@ function rebuildDerived(){
   YRS.forEach(y=>{ if(!TG[y]) TG[y]={year:y,rev_target:0,fee_target:0,
     bp_budget:0,inv_budget:0,esc:0,other_rev:0,other_fee:0}; });
 
+  Object.keys(DTG).forEach(k=>delete DTG[k]);
+  (D.scope_targets||[]).forEach(t=>{DTG[t.year]={
+    year:t.year, rev_target:+t.rev_target||0, fee_target:+t.fee_target||0,
+    bp_budget:+t.bp_budget||0, inv_budget:+t.inv_budget||0,
+    other_rev:+t.other_rev||0, other_fee:+t.other_fee||0};});
+  YRS.forEach(y=>{ if(!DTG[y]) DTG[y]={year:y,rev_target:0,fee_target:0,
+    bp_budget:0,inv_budget:0,other_rev:0,other_fee:0}; });
+
   SB = null;   // sandbox is a copy of the portfolio; rebuild it
 }
 
@@ -2664,12 +2722,18 @@ function numify(x){
 }
 
 async function loadData(){
-  const r = await fetch('/api/bootstrap', {credentials:'same-origin'});
+  const qs = selectedScopeNodeId ? `?scope_node_id=${selectedScopeNodeId}` : '';
+  const r = await fetch(`/api/bootstrap${qs}`, {credentials:'same-origin'});
   if(r.status===401){ showLogin(); return false; }
   if(!r.ok) throw new Error('bootstrap failed: '+r.status);
   const data = await r.json();
   data.pursuits = (data.pursuits||[]).map(numify);
   D = data;
+  // Mirror whatever the server actually resolved -- right after sign-in
+  // (no selection made yet) this picks up the server's own default (the
+  // caller's full assigned scope), and on every later load it keeps the
+  // picker's state from drifting away from reality.
+  selectedScopeNodeId = (data.scope && data.scope.current_org_node_id) || null;
   // The change-poll cursor resets on every successful load, manual
   // refreshes included -- whatever is fresh as of THIS load is the new
   // baseline, so the same change is never reported twice.
@@ -2697,7 +2761,7 @@ async function loadData(){
       hideChangeBanner();
       SB = null; sbSel = null; selUid = null; detailMode = false; page = 1;
       editBuf = {}; editUid = null; REF = null;
-      targetBuf = {}; selectedTargetOrgNode = null;
+      targetBuf = {}; selectedTargetOrgNode = null; selectedScopeNodeId = null;
       sortKey = 'value'; sortDir = -1;
       FLT = {market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:''};
       cur = 'dash';          // a new session starts at the dashboard

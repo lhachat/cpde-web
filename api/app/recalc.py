@@ -20,7 +20,7 @@ from fastapi import HTTPException, status
 from psycopg.types.json import Jsonb
 
 from .db import fetch_all, fetch_one
-from .engine_client import call_run
+from .engine_client import EngineCredentialError, call_run
 from .fee import resolve_fee
 from .scoring import BASE_SCORE, accumulate, lookup
 
@@ -52,7 +52,8 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
                ct.code AS contract_type_code,
                m.code AS market_code,
                ot.type_group, ps.code AS stage_code,
-               c.engine_client_code, c.engine_base_url
+               c.code, c.engine_client_code, c.engine_base_url,
+               c.engine_secret_ref
           FROM pursuit p
           LEFT JOIN contract_type ct ON ct.id = p.contract_type_id
           LEFT JOIN market m ON m.id = p.market_id
@@ -170,6 +171,14 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
 
     try:
         result = await call_run(pu, payload)
+    except EngineCredentialError as exc:
+        # A credential/SSM/IAM problem, NOT an engine-side failure --
+        # keep the message specific ("could not resolve engine
+        # credentials...") rather than folding it into the generic
+        # "could not reach the engine" below, which would send someone
+        # debugging a real credential expiry down a network/DNS rabbit
+        # hole instead.
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
     except Exception as exc:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,

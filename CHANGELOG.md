@@ -9,6 +9,199 @@ it does.
 
 ---
 
+## [0.4.0] — 2026-09-02
+
+Significant scope since v0.3.1 -- this is the first round where
+`cpde-web` authenticated against real AWS infrastructure and the real
+production engine, not local stubs or overrides, alongside a full pass
+of Targets & Budgets / Dashboard scope fixes and a new market-sync
+feature. Every item below was verified by actually driving it -- live
+API calls, live AWS/SSM calls, Playwright where UI was involved -- not
+read from a diff.
+
+### Targets & Budgets and Dashboard scope fixes
+
+- **The Targets picker genuinely didn't work.** Root cause: a dead,
+  hardcoded `.chip` UI element sat exactly where a real BU picker
+  belonged, styled to look clickable but wired to nothing -- the real,
+  working picker was a plain `<select>` elsewhere on the page that a
+  real user had no reason to notice. Removed the dead chips; the real
+  picker now shows a "Viewing: X — Change" banner so the current
+  selection is never invisible again.
+- Whole-business scope added as a valid Targets/Dashboard target, not
+  just license-boundary business units -- confirmed nothing in the
+  schema (`plan_year.org_node_id`) structurally prevented it.
+- **Dashboard showed a real $0 target for any multi-candidate user**,
+  including AERO's own business-level admin -- last round's own
+  ambiguity fix (refusing to guess which BU's targets to show) had no
+  UI path to resolve the ambiguity for the Dashboard specifically. Fixed
+  with a new hierarchical rollup selector (division / BU / whole
+  business, matching the real org tree depth, not hardcoded to two
+  levels) and a rollup query that sums every descendant's own
+  `plan_year` row -- verified against AERO's real, asymmetric BU/BU2
+  target split ($250.0M + $41.4M = $291.4M), not just a trivial
+  single-branch case.
+- Org-unit picker added to the pursuit edit form (full path label,
+  e.g. "Advanced Systems | Sensors" vs. "Space Systems" alone,
+  generated from the real tree depth). Reassignment is scope-limited
+  (reuses `fn_user_visible_org_nodes`, no new access-control mechanism)
+  and audited through the same trigger as every other pursuit edit.
+  Confirmed directly against the schema that a pursuit CAN structurally
+  sit on a BU with real divisions beneath it -- the "leaf nodes only"
+  picker rule is therefore an application-level choice, not a database
+  guarantee, and is documented as such.
+- `org_node.is_test_fixture` added so a synthetic node created purely
+  to give the scope test suite a genuinely-empty fixture (`BUZ`) is
+  excluded from all three user-facing pickers (Targets, Dashboard,
+  pursuit org-unit) while remaining fully functional for actual scope
+  resolution -- a user genuinely scoped to a test-fixture node still
+  resolves correctly through `fn_user_visible_org_nodes`/
+  `fn_user_pursuits`, verified directly, not just documented as intent.
+
+### Real SSM/IAM engine authentication
+
+- `engine_client.py` now resolves real per-client API keys from AWS SSM
+  (`ssm:GetParameter` with decryption), replacing the local-dev env-var
+  override entirely -- one credential path, not two.
+- Standard AWS credential chain (STS-assumed role locally via
+  `cpdeWebLocalDevRole`, task role in production via `cpdeWebTaskRole`
+  when that deployment exists) -- no code-level distinction between the
+  two.
+- 5-minute in-process key cache, invalidated on a 401/403 from the
+  engine rather than trusted blindly for its full TTL.
+- `refresh-aws-creds.ps1` -- local dev credential helper, hardened to
+  print the resolved IAM identity back to the developer after every
+  refresh (built specifically after an earlier round accidentally
+  exported an admin session instead of the scoped role).
+- Real end-to-end Recalculate Pwin verified against the live production
+  engine (`api.cda-us.com`), not a stub, for a known AERO pursuit --
+  result matched already-stored data.
+
+### Data fixes found and corrected
+
+- `client.engine_secret_ref` for DEMO and AERO updated to the real
+  per-product SSM paths (the per-product API key scoping cutover had
+  deleted the old flat paths).
+- DEMO's `engine_client_code` corrected from `collins` to the real
+  `collins-aerospace` -- a naming mismatch between two independently-run
+  pieces of work, not a bug in either one individually, found because it
+  became load-bearing once real SSM resolution went live.
+
+### `client_escalation_rate` write endpoint
+
+- `PUT/GET /api/staffing/escalation-rates[/{year}]`, same role gate as
+  plan-year targets, deliberately NOT audited via `fn_audit` (a prior,
+  documented design decision -- operational configuration, not pursuit
+  data -- correctly preserved rather than silently overridden this
+  round).
+- Verified an override is actually CONSUMED by a real staffing
+  calculation, not just stored (BDGEN/2028-01 escalated figure changed
+  correctly when a client override was set, reverted correctly when
+  removed).
+
+### Market sync
+
+- New scheduled job polling the engine's `/v1/markets` (never SSM's
+  `/config` directly -- `cpde-web`'s IAM is deliberately not scoped to
+  read differentials) and syncing the local `market` table.
+- Additions sync automatically; removals are NEVER auto-deleted, only
+  flagged for review (`flagged_for_review`, `flagged_at`,
+  `flagged_reason`) -- a market disappearing while pursuits reference it
+  is a human decision. Renames cannot be distinguished from a removal +
+  an addition -- confirmed directly against the engine's own
+  `GET /v1/markets` contract (bare display-name strings, no code or id
+  at all) rather than assumed; documented as a real, structural
+  limitation, not an oversight.
+- Verified against REAL production drift, not a synthetic test case:
+  Collins-aerospace's real market list had grown to 5 (from the 3
+  originally loaded); the sync correctly created the 2 missing ones and
+  left the existing 3 untouched.
+- Confirmed the recurring background loop fires on its own schedule
+  (observed multiple times, unprompted, during verification), not just
+  via manual trigger.
+- `empower-ai` has no client row in `cpde-web` yet -- market sync
+  correctly has nothing to do there; this resolves naturally whenever
+  that tenant is actually onboarded, not a bug to chase now.
+- Production gate (blocked on the engine team's three-layer client-
+  config migration) is now CONFIRMED CLEAR -- explicit sign-off
+  received for all three real clients, not inferred from documentation.
+  `MARKET_SYNC_ENABLED` already defaults true in local dev; no separate
+  `cpde-web` production deployment exists yet to flip anything else on.
+
+### External reference verification (engine v0.27 integration doc)
+
+- Systematic verification against the engine team's own published
+  integration reference -- found and confirmed a REAL ERROR IN THE
+  REFERENCE DOC ITSELF: its example competitor `scores` keys
+  (`tech`/`mgmt`/`pp`) fail against the live engine (DAP solver error,
+  every synthetic competitor, for a real pursuit's real inputs);
+  `cpde-web`'s actual keys (`Technical`/`Management`/`Past Performance`,
+  matching the original VBA contract) are the ones the engine actually
+  reads correctly. No prior Recalculate Pwin result was affected --
+  `cpde-web` has always sent the correct keys. Locked in as a permanent
+  live regression test.
+- Confirmed every engine call in the codebase checks the correct,
+  endpoint-specific failure signal (`solver_succeeded`, not bare HTTP
+  status -- every engine endpoint returns 200 regardless of success).
+  Added a regression test proving `recalc.py` actually raises on a
+  200-with-`solver_succeeded:false` response rather than treating the
+  HTTP success as computation success.
+- Confirmed `cpde-web` calls exactly two engine endpoints (`/v1/run`,
+  `/v1/markets`) and nothing outside its key's authorized scope.
+- Ran the engine team's own suggested smoke test end to end, live:
+  `GET /health` (confirmed `product: cpde-core`, correct `client_name`,
+  `engine_version: 0.27`), `GET /v1/markets` (real list, not the
+  generic fallback), `POST /v1/run` (matched a known-good stored Pwin
+  exactly).
+
+### Process note worth carrying forward
+
+A shared reference document from the team that owns the engine was
+still WRONG on a real, load-bearing detail. Verify against the live
+system even when a trusted source's documentation says otherwise --
+this is the second time this project has found a documentation/
+assumption error by testing live rather than trusting a written source
+(the first was the IP-boundary correction earlier this project).
+
+### Test suite growth
+
+| Suite | Assertions | Result |
+|---|---|---|
+| `test_isolation.py` — tenant isolation (RLS) | 29 | pass |
+| `test_scope.py` — business-unit scope | 14 | pass |
+| `test_integrity.py` — data integrity | 44 | pass (1 warning, non-fatal, unchanged since v0.2.0) |
+| `test_api_security.py` — API-layer security | 116 | pass |
+| `test_staffing_escalation.py` — staffing escalation model | 14 | pass |
+| `test_market_sync.py` — market sync job | 16 | pass |
+| `test_recalc_response_handling.py` — engine response-shape discipline | 3 | pass |
+| `test_engine_client.py` — real AWS/SSM + live engine verification | 8 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+
+**244 assertions passing across eight suites** (up from 164 across five
+at v0.3.1).
+
+### Known gaps
+
+- No real `cpde-web` production ECS deployment yet -- `cpdeWebTaskRole`
+  exists, inert. Whoever builds it should default
+  `MARKET_SYNC_ENABLED=true` in that environment's config (documented
+  in three places this round specifically so this isn't rediscovered).
+- `empower-ai` has no `cpde-web` client row -- not a bug, just not
+  onboarded yet.
+- `pwin_assessment.blended_pwin` (the dependency-blend math combining a
+  `BASE` and `DEPENDENT_WON` assessment) is still not computed anywhere
+  -- unchanged since v0.3.0.
+- Two AERO pursuits reassigned from BMC2A to MSN in the database only;
+  their stored Pwins were computed against BMC2A's differential --
+  unchanged since v0.3.0.
+- `06_plan_year.sql` superseded by `migrate_workbook.py`; delete it --
+  unchanged since v0.3.0.
+- Tests are still not automated on commit.
+- No licensing enforcement.
+- Duplicate-pursuit detection remains unbuilt (see the working brief's
+  backlog).
+
+---
+
 ## [0.3.1] — 2026-09-01
 
 Resolves the top Known Gap from v0.3.0: Targets & Budgets was unusable

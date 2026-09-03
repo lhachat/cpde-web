@@ -69,6 +69,36 @@ def main():
              WHERE u.email = 'aero.div1@demoaero.test'
             ON CONFLICT (user_id, org_node_id, role_id) DO NOTHING""")
 
+        # DIV1/DIV2/DIV3 and BU2 all now hold real pursuits (AERO's org
+        # structure grew real content -- 46/47/30/27 respectively), so
+        # none of them can stand in for "an org node that genuinely holds
+        # nothing" any more. A fixture BU, sibling of BU/BU2 directly
+        # under the root, never assigned any pursuit or division -- so
+        # "narrow scope excludes" is proven against a node that is
+        # provably empty by construction, not by coincidence of today's
+        # data. Deliberately NOT a child of BU or BU2: BU already has
+        # exactly three real divisions and BU2 deliberately has none (a
+        # later Dashboard-picker test relies on that exact shape), and a
+        # test-only child under either would corrupt those real counts.
+        admin.execute("""
+            INSERT INTO org_node (client_id, parent_id, node_type, code,
+                                  name, is_license_boundary)
+            SELECT %s, o.id, 'business_unit', 'BUZ', 'Zero-Pursuit Test BU', true
+              FROM org_node o WHERE o.client_id = %s AND o.code = 'BUSINESS'
+            ON CONFLICT (client_id, code) DO NOTHING""", (aero, aero))
+        admin.execute("""
+            INSERT INTO app_user (client_id, email, display_name)
+            SELECT %s, 'aero.buz@demoaero.test', 'Aero Empty-BU Capture Mgr'
+            ON CONFLICT (client_id, email) DO NOTHING""", (aero,))
+        admin.execute("""
+            INSERT INTO user_scope_assignment (user_id, org_node_id, role_id)
+            SELECT u.id, o.id, r.id
+              FROM app_user u
+              JOIN org_node o ON o.client_id = u.client_id AND o.code = 'BUZ'
+              JOIN role r ON r.code = 'capture_manager'
+             WHERE u.email = 'aero.buz@demoaero.test'
+            ON CONFLICT (user_id, org_node_id, role_id) DO NOTHING""")
+
         users = dict(admin.execute("""
             SELECT email, id FROM app_user WHERE client_id = %s""", (aero,)).fetchall())
         nodes = dict(admin.execute("""
@@ -82,8 +112,9 @@ def main():
         admin.commit()
 
     admin_u = users["aero.admin@demoaero.test"]     # scoped at BUSINESS
-    bu2_u = users["aero.bu2@demoaero.test"]         # scoped at BU2 (empty)
-    div_u = users["aero.div1@demoaero.test"]        # scoped at DIV1 (empty)
+    bu2_u = users["aero.bu2@demoaero.test"]         # scoped at BU2 (27 real pursuits)
+    div_u = users["aero.div1@demoaero.test"]        # scoped at DIV1 (46 real pursuits)
+    buz_u = users["aero.buz@demoaero.test"]         # scoped at BUZ (genuinely empty)
 
     with psycopg.connect(args.app_dsn, autocommit=True) as app:
         role, sup, byp = app.execute(
@@ -119,12 +150,41 @@ def main():
             "SELECT count(*) FROM fn_user_pursuits(%s)", (bu2_u,)).fetchone()[0]
         div_p = cur.execute(
             "SELECT count(*) FROM fn_user_pursuits(%s)", (div_u,)).fetchone()[0]
+        buz_nodes = cur.execute(
+            "SELECT count(*) FROM fn_user_visible_org_nodes(%s)", (buz_u,)).fetchone()[0]
+        buz_p = cur.execute(
+            "SELECT count(*) FROM fn_user_pursuits(%s)", (buz_u,)).fetchone()[0]
         cur.execute("COMMIT")
+        with psycopg.connect(args.admin_dsn) as admin:
+            real_bu2 = admin.execute("""
+                SELECT count(*) FROM pursuit p JOIN org_node o ON o.id = p.org_node_id
+                 WHERE o.code = 'BU2' AND p.is_active""").fetchone()[0]
+            real_div1 = admin.execute("""
+                SELECT count(*) FROM pursuit p JOIN org_node o ON o.id = p.org_node_id
+                 WHERE o.code = 'DIV1' AND p.is_active""").fetchone()[0]
         check("BU2 user sees only its own node", bu2_nodes == 1, f"saw {bu2_nodes}")
-        check("BU2 user sees no pursuits (BU2 holds none)", bu2_p == 0,
-              f"LEAKED {bu2_p} pursuits from another business unit")
-        check("division user sees no pursuits (DIV1 holds none)", div_p == 0,
-              f"LEAKED {div_p} pursuits")
+        # BU2 and DIV1 now hold real, non-trivial pursuit counts (not the
+        # empty case) -- proves scope narrows to EXACTLY that node's own
+        # real data, not a coincidental zero.
+        check("BU2 user sees exactly BU2's own real pursuits, no more, no less",
+              bu2_p == real_bu2 and 0 < bu2_p < admin_p,
+              f"saw {bu2_p}, DB has {real_bu2} under BU2, admin sees {admin_p}")
+        check("division user sees exactly DIV1's own real pursuits, no more, no less",
+              div_p == real_div1 and 0 < div_p < admin_p,
+              f"saw {div_p}, DB has {real_div1} under DIV1, admin sees {admin_p}")
+        # A genuinely empty fixture BU proves no leak from ANY other
+        # business unit -- the case BU2/DIV1 used to (accidentally) cover
+        # before they had real content of their own.
+        check("a genuinely empty BU sees no pursuits (no leak)",
+              buz_p == 0, f"LEAKED {buz_p} pursuits")
+        # is_test_fixture hides BUZ from user-facing PICKERS only -- it
+        # must never touch actual scope resolution. A user genuinely
+        # scoped to BUZ still resolves to exactly their own node here,
+        # same as any other single-node scope assignment.
+        check("a user scoped to a test-fixture node still resolves "
+              "through fn_user_visible_org_nodes exactly as normal -- "
+              "is_test_fixture is display-only, not access control",
+              buz_nodes == 1, f"saw {buz_nodes}")
         check("narrow scope sees strictly fewer than broad scope",
               bu2_p < admin_p, "narrow scope saw as much as the admin")
 

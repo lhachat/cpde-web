@@ -52,6 +52,26 @@ services:
       # reaches the cda-engine-local container's host-mapped port 8420 --
       # cda-engine-local and cpde-api are not on the same compose network.
       CPDE_ENGINE_URL: http://host.docker.internal:8420
+      # Local dev only -- see market_sync.py's own docstring for the
+      # production hold (blocked on the engine team's three-layer
+      # client-config migration being confirmed complete). Left at
+      # market_sync.py's own default interval (15 min) -- the local
+      # engine stub falls back to a placeholder for any key it can't
+      # resolve today, so every cycle currently flags all of AERO's
+      # and DEMO's real seeded markets; a short interval would just
+      # make that repeat needlessly often.
+      MARKET_SYNC_ENABLED: "true"
+      # Populated by refresh-aws-creds.ps1 into ./.env (gitignored),
+      # which `docker compose` reads automatically -- no env_file:
+      # directive needed. boto3 picks these up via the standard AWS
+      # credential chain with no code-level distinction from how a real
+      # ECS task's role would be picked up in production. Empty/unset
+      # (the default with no .env present) is fine -- anything that
+      # doesn't need SSM access keeps working without these.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_DEFAULT_REGION: us-east-1
     ports:
       - "8001:8001"
     volumes:

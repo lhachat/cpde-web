@@ -18,6 +18,14 @@ Write-Host "`n########## DATA INTEGRITY ##########" -ForegroundColor Cyan
 python test_integrity.py --dsn $ADMIN
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
 
+Write-Host "`n########## MARKET SYNC ##########" -ForegroundColor Cyan
+python test_market_sync.py --admin-dsn $ADMIN
+if ($LASTEXITCODE -ne 0) { $fail = 1 }
+
+Write-Host "`n########## RECALC RESPONSE HANDLING ##########" -ForegroundColor Cyan
+python test_recalc_response_handling.py --admin-dsn $ADMIN
+if ($LASTEXITCODE -ne 0) { $fail = 1 }
+
 # Needs the API running on :8001. Skipped if it is not up, because a
 # skipped suite you know about beats a red run you learn to ignore.
 Write-Host "`n########## API SECURITY ##########" -ForegroundColor Cyan
@@ -36,6 +44,23 @@ try {
     if ($LASTEXITCODE -ne 0) { $fail = 1 }
 } catch {
     Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
+# Needs a live, correctly-scoped AWS session (run .\refresh-aws-creds.ps1
+# first) reaching the API container -- that is where real credentials
+# actually live (via .env -> docker-compose interpolation), not
+# necessarily this host shell. Skipped, not failed, if no session is
+# present -- most days nobody touches SSM resolution, and a hard
+# failure here would train everyone to ignore this suite.
+Write-Host "`n########## ENGINE CLIENT (real AWS/SSM) ##########" -ForegroundColor Cyan
+docker exec cpde-api python -c "import boto3; boto3.client('sts').get_caller_identity()" 2>$null
+if ($LASTEXITCODE -eq 0) {
+    docker cp test_engine_client.py cpde-api:/tmp/test_engine_client.py | Out-Null
+    docker exec cpde-api python /tmp/test_engine_client.py
+    if ($LASTEXITCODE -ne 0) { $fail = 1 }
+    docker exec cpde-api rm -f /tmp/test_engine_client.py | Out-Null
+} else {
+    Write-Host "SKIPPED - no live AWS session in the api container; run .\refresh-aws-creds.ps1 first" -ForegroundColor Yellow
 }
 
 if ($fail) {
