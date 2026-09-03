@@ -204,3 +204,23 @@ async def call_get_markets(client_row: dict) -> list[str]:
         r.raise_for_status()
         body = r.json()
         return body.get("markets", [])
+
+
+async def call_get_scoring_tables(client_row: dict) -> dict:
+    """GET /v1/scoring-tables -- the full TM1a-P1 scoring table, used by
+    scoring.py. Static response, identical for every caller (no per-
+    client resolution) -- client_row here is only for authenticating
+    the request (any active client's key works equally), same shared
+    credential path as every other engine call.
+
+    Raises EngineCredentialError or httpx's own exception, same
+    separation as call_run/call_get_markets -- never returns a partial
+    or default table on failure."""
+    url = resolve_engine_url(client_row).rstrip("/") + "/v1/scoring-tables"
+    headers = _engine_headers(client_row)
+    async with httpx.AsyncClient(timeout=20) as http:
+        r = await http.get(url, headers=headers)
+        if r.status_code in (401, 403):
+            invalidate_engine_api_key_cache(client_row)
+        r.raise_for_status()
+        return r.json()

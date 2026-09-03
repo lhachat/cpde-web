@@ -1,6 +1,14 @@
 -- =====================================================================
 -- 13_bhptw_fee.sql -- Fee inputs for the Black Hat form
 --
+-- DEPRECATED as of ddl/17_deprecate_fee_columns.sql: fee.py now reads
+-- both of these values from the engine's live GET /v1/scoring-tables
+-- (fee_rates + the p1 table, via scoring.py -- see fee.py's own
+-- docstring) instead of the two columns this file seeds below.
+-- Neither contract_type.base_fee_rate nor question_option.price_delta
+-- is read by any application code any more -- kept, not dropped, as of
+-- this writing (see 17_deprecate_fee_columns.sql for why).
+--
 -- Goes in ddl/.
 --
 -- WHY: Black Hat fee = get_fee(contract_type) + P1 aggressiveness delta

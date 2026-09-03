@@ -26,6 +26,14 @@ Write-Host "`n########## RECALC RESPONSE HANDLING ##########" -ForegroundColor C
 python test_recalc_response_handling.py --admin-dsn $ADMIN
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
 
+Write-Host "`n########## SCORING TABLE MIGRATION ##########" -ForegroundColor Cyan
+python test_scoring_migration.py --admin-dsn $ADMIN
+if ($LASTEXITCODE -ne 0) { $fail = 1 }
+
+Write-Host "`n########## FEE/COMPETITOR MIGRATION ##########" -ForegroundColor Cyan
+python test_fee_competitor_migration.py --admin-dsn $ADMIN
+if ($LASTEXITCODE -ne 0) { $fail = 1 }
+
 # Needs the API running on :8001. Skipped if it is not up, because a
 # skipped suite you know about beats a red run you learn to ignore.
 Write-Host "`n########## API SECURITY ##########" -ForegroundColor Cyan

@@ -26,6 +26,34 @@ If your SSO session itself has expired, the script will tell you to run
 `aws sso login` first -- that step is a human, browser-based flow and is
 deliberately not scripted.
 
+**To stop re-running this by hand every ~hour**, register a Scheduled
+Task that does it automatically, every 45 minutes:
+
+```powershell
+.\install-refresh-task.ps1
+```
+
+Runs as your own Windows account (not SYSTEM -- it needs your cached
+SSO session to assume-role without prompting), so it only fires while
+you're logged on. It still cannot do `aws sso login` itself; if that
+base session lapses, the scheduled run fails and logs why to
+`logs\aws-creds-refresh.log` -- check it (or the state of things) with:
+
+```powershell
+.\check-aws-creds-status.ps1
+```
+
+Every successful refresh recreates the `api` container (`docker compose
+up -d api`) -- a brief restart, roughly every 45 minutes. This is not
+avoidable with the current design: Docker does not propagate a changed
+`.env` file into an already-running container's environment, and
+`engine_client.py`'s `boto3.client("ssm")` is a process-lifetime
+singleton that resolves credentials once, not on every call -- so
+picking up new credentials requires a new container process either
+way.
+
+To remove the scheduled task later: `.\uninstall-refresh-task.ps1`.
+
 Then start the stack as usual:
 
 ```powershell

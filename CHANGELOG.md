@@ -9,6 +9,123 @@ it does.
 
 ---
 
+## [0.5.0] — 2026-09-03
+
+Significant scope since v0.4.0 -- the first cross-product consistency
+audit ran, found a real engine-side bug, and led to scoring, fee, and
+competitor construction all moving from three independently-maintained
+copies to one engine-served source of truth. Every item below was
+verified live -- real AWS/SSM calls, the real production engine, actual
+before/after comparisons for known pursuits -- not read from a diff or
+taken on another team's word.
+
+### Cross-product consistency audit — first run
+
+- New standing practice: a routine audit comparing `cpde-web`, the
+  Salesforce plugin, and the engine directly against each other and
+  against the live system, not against documentation or memory.
+- Found a real engine-side scoring bug: TM1a "No" scored -10/-10,
+  TM1b "No" scored +10/+10, both should be 0/0 -- confirmed against the
+  real source VBA (`CPwinScoringTables.cls`). `cpde-web`'s own scoring
+  port was already correct on both; the bug was engine-only.
+- Confirmed the bug had zero real-world impact: no production Pwin was
+  ever computed through the engine's own answer-scoring path (disabled
+  since early this project), and no real client data existed during the
+  exposure window regardless -- demo data only.
+- Found and narrowed an over-broad IAM policy (`CpdeWebCoreReadPolicy`):
+  previously granted read access to the `config` path (differentials)
+  in addition to the `key-value` secret actually used; narrowed to the
+  three specific parameter names needed, `GetParametersByPath` dropped
+  entirely. Verified live: `key-value` still resolves, `config` and
+  path-based listing are now genuinely denied by direct attempt.
+- Found a stale doc in the Salesforce plugin -- handed off to that repo
+  directly, not `cpde-web`'s to fix.
+
+### Scoring, fee, and competitor construction moved to the engine
+
+- `GET /v1/scoring-tables` (engine) is now the single source for the
+  full TM1a-P1 delta table and the nominal fee-rate-by-contract-type
+  table (`fee_rates`, folded into the same response) -- `cpde-web`
+  fetches and caches both live; the local hardcoded copies are REMOVED,
+  not kept as a dormant fallback.
+- `/v1/run` (engine) now accepts an optional `bidders: int` as an
+  alternative to a hand-built `competitors` array -- `cpde-web`'s local
+  "Avg Co N" construction logic is REMOVED, replaced by sending the
+  bidder count directly.
+- Resolved a previously-unlogged THIRD copy of the P1 delta table
+  (`question_option`/`ddl/13_bhptw_fee.sql`) discovered during this
+  migration -- `fee.py` now reads the same live `p1` table `scoring.py`
+  already fetches; the old columns are deprecated (flagged, not
+  dropped) via `ddl/17_deprecate_fee_columns.sql`.
+- All of the above verified live, end to end, against the real
+  production engine for a known AERO pursuit (opp 1046) -- Pwin
+  (`0.169275`) and fee (`0.075000`) both identical before and after
+  every change in this set.
+- Competitor-construction equivalence independently re-verified by
+  `cpde-web` itself, not taken on the engine team's "confirmed
+  byte-identical" report alone: the old hand-built `competitors` array
+  and the new `bidders: N` payload were run side-by-side against the
+  same real pursuit on the same live engine, and the resulting `pwin`
+  values compared directly.
+
+### Local dev credential automation
+
+- Scheduled Task (`cpde-web-aws-creds-refresh`, 45-minute interval,
+  runs as the interactive user, never SYSTEM) automates the
+  `cpdeWebLocalDevRole` assume-role refresh -- `aws sso login` itself
+  remains manual by design, since that step requires human browser
+  approval and should not be automated around.
+- Confirmed and documented: every successful refresh recreates the
+  `api` container (Docker doesn't propagate `.env` changes to a running
+  container; `engine_client.py`'s SSM client is a process-lifetime
+  singleton either way) -- a real, accepted ~45-minute restart cadence,
+  stated plainly rather than hidden.
+- Failure path genuinely tested (both the SSO login-token cache and the
+  derived-credential cache removed to simulate a real expiry, not just
+  reasoned about) -- failure surfaces in Task Scheduler's own result
+  code and a dedicated log file, readable via `check-aws-creds-status.ps1`.
+
+### Test suite growth
+
+| Suite | Assertions | Result |
+|---|---|---|
+| `test_isolation.py` — tenant isolation (RLS) | 29 | pass |
+| `test_scope.py` — business-unit scope | 14 | pass |
+| `test_integrity.py` — data integrity | 44 | pass (1 warning, non-fatal, unchanged since v0.2.0) |
+| `test_api_security.py` — API-layer security | 116 | pass |
+| `test_staffing_escalation.py` — staffing escalation model | 14 | pass |
+| `test_market_sync.py` — market sync job | 16 | pass |
+| `test_recalc_response_handling.py` — engine response-shape discipline | 3 | pass |
+| `test_scoring_migration.py` — live scoring-table migration (new) | 10 | pass |
+| `test_fee_competitor_migration.py` — fee/competitor migration (new) | 8 | pass |
+| `test_engine_client.py` — real AWS/SSM + live engine verification | 10 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+
+**264 assertions passing across ten suites** (up from 244 across eight
+at v0.4.0).
+
+### Known gaps
+
+- `market_sync` noise: repeatedly flags AERO's real markets and injects
+  a placeholder while running against production -- cosmetic, not yet
+  investigated, worth a look. New this round.
+- The Salesforce plugin has not yet migrated to the new
+  `/v1/scoring-tables` `fee_rates` or the `bidders` shortcut -- that
+  repo's own work, tracked there, not blocking anything here.
+- No real `cpde-web` production ECS deployment yet -- `cpdeWebTaskRole`
+  exists, inert. Unchanged since v0.4.0.
+- `empower-ai` still has no `cpde-web` client row -- not currently
+  needed, Excel-only for now. Unchanged since v0.4.0.
+- `pwin_assessment.blended_pwin` (the dependency-blend math combining a
+  `BASE` and `DEPENDENT_WON` assessment) is still not computed anywhere
+  -- unchanged since v0.3.0.
+- Two AERO pursuits reassigned from BMC2A to MSN in the database only;
+  their stored Pwins were computed against BMC2A's differential --
+  unchanged since v0.3.0.
+- `06_plan_year.sql` superseded by `migrate_workbook.py`; delete it --
+  unchanged since v0.3.0.
+- Tests are still not automated on commit.
+- No licensing enforcement.
+
 ## [0.4.0] — 2026-09-02
 
 Significant scope since v0.3.1 -- this is the first round where

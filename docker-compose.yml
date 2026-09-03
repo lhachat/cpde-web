@@ -51,7 +51,7 @@ services:
       # client.engine_base_url's production value. host.docker.internal
       # reaches the cda-engine-local container's host-mapped port 8420 --
       # cda-engine-local and cpde-api are not on the same compose network.
-      CPDE_ENGINE_URL: http://host.docker.internal:8420
+      CPDE_ENGINE_URL: https://api.cda-us.com
       # Local dev only -- see market_sync.py's own docstring for the
       # production hold (blocked on the engine team's three-layer
       # client-config migration being confirmed complete). Left at

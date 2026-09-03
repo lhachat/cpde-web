@@ -38,9 +38,29 @@ def main():
     args = ap.parse_args()
 
     sys.path.insert(0, "api")
-    from app import recalc as recalc_module
+    from app import recalc as recalc_module, scoring
     from app.db import tenant_tx
     from fastapi import HTTPException
+
+    # This test is about solver_succeeded handling, not scoring values --
+    # an empty-but-loaded table is enough (every lookup() call falls
+    # through to the all-zero row, same as an unknown answer). Populating
+    # it directly, not via a real engine fetch, keeps this test fast and
+    # AWS-independent -- scoring.py's OWN fetch/cache behavior has its
+    # own dedicated test (test_scoring_migration.py).
+    # fee.py's resolve_fee() now reads from scoring's live-fetched fee
+    # rate table + p1 table too (fee/competitor migration) -- populate
+    # both here for the same AWS-independent reason as _tables/
+    # BASE_SCORE above. "p1" needs at least the option label used by
+    # the test pursuit's real P1 answer, with a real client_price, or
+    # lookup() falls through to the all-zero row and resolve_fee()
+    # still works (0.0 delta) -- either way this test isn't about fee
+    # VALUES, just about not raising ScoringTableError from an unloaded
+    # cache.
+    scoring._tables = {}
+    scoring.BASE_SCORE = 85.0
+    scoring._fee_rates = {"cost plus": 0.065, "time & materials": 0.08,
+                          "fixed price": 0.10}
 
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         aero = db.execute("SELECT id FROM client WHERE code = 'AERO'").fetchone()["id"]

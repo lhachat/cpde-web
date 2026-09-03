@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from .auth import (DEV_LOGIN_ENABLED, SESSION_COOKIE, Principal,
                    create_session, current_principal, destroy_session,
                    lookup_user)
+from . import scoring
 from .db import close_pool, pool
 from .market_sync import market_sync_loop
 from .routers import bhptw, bootstrap, portfolio, recalc, staffing, write
@@ -59,12 +60,25 @@ app.include_router(recalc.router)
 
 
 _market_sync_task: asyncio.Task | None = None
+_scoring_refresh_task: asyncio.Task | None = None
 
 
 @app.on_event("startup")
-def _startup() -> None:
-    global _market_sync_task
+async def _startup() -> None:
+    global _market_sync_task, _scoring_refresh_task
     pool()
+
+    # AWAITED, not fire-and-forget -- the scoring table must be loaded
+    # before the first real Recalculate Pwin request needs it, not
+    # racing a background task. If the engine is unreachable right now,
+    # startup_refresh() logs loudly and leaves the cache empty rather
+    # than raising here -- the rest of the app (staffing, portfolio
+    # browsing, anything not touching recalculation) must still be able
+    # to start and serve requests; only recalculation itself fails
+    # (loudly, via ScoringTableError) until a later refresh succeeds.
+    await scoring.startup_refresh()
+    _scoring_refresh_task = asyncio.create_task(scoring.refresh_loop())
+
     # OFF by default IN THIS CODE, deliberately -- but that default was
     # for the gate that used to exist here (blocked on the engine
     # team's three-layer client-config migration). That gate is now
@@ -93,6 +107,8 @@ def _startup() -> None:
 def _shutdown() -> None:
     if _market_sync_task is not None:
         _market_sync_task.cancel()
+    if _scoring_refresh_task is not None:
+        _scoring_refresh_task.cancel()
     close_pool()
 
 

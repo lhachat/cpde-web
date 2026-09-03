@@ -19,10 +19,19 @@ from __future__ import annotations
 from fastapi import HTTPException, status
 from psycopg.types.json import Jsonb
 
+from . import scoring
 from .db import fetch_all, fetch_one
 from .engine_client import EngineCredentialError, call_run
 from .fee import resolve_fee
-from .scoring import BASE_SCORE, accumulate, lookup
+from .scoring import ScoringTableError, accumulate, lookup
+
+# BASE_SCORE is read via the `scoring` module reference (scoring.BASE_SCORE),
+# not `from .scoring import BASE_SCORE` -- that form binds the value at
+# IMPORT time, which would freeze this module onto whatever BASE_SCORE
+# happened to be (possibly still None) before the engine fetch ever
+# completed. accumulate/lookup are plain functions, not frozen values --
+# importing them by name is fine, since they read scoring's live module
+# state at CALL time, not at import time.
 
 # Question codes scored by scoring.py, in a fixed order for the
 # accumulation list -- order doesn't affect the sum, but keeping it fixed
@@ -129,32 +138,35 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
             "This pursuit has no P1 (price aggressiveness) answer -- "
             "complete the Pwin questionnaire before recalculating.")
 
-    deltas = [lookup("tm5", label("TM5"), pu["type_group"] or "")
-              if code == "TM5" else lookup(code, label(code))
-              for code in _SCORED_QUESTIONS]
-    total = accumulate(deltas)
-
-    tech = BASE_SCORE + total["tech"]
-    mgmt = BASE_SCORE + total["mgmt"]
-    pp = BASE_SCORE + total["pp"]
+    try:
+        deltas = [lookup("tm5", label("TM5"), pu["type_group"] or "")
+                 if code == "TM5" else lookup(code, label(code))
+                 for code in _SCORED_QUESTIONS]
+        total = accumulate(deltas)
+        tech = scoring.BASE_SCORE + total["tech"]
+        mgmt = scoring.BASE_SCORE + total["mgmt"]
+        pp = scoring.BASE_SCORE + total["pp"]
+    except ScoringTableError as exc:
+        # The scoring table itself couldn't be loaded from the engine --
+        # this can't even be attempted, distinct from /v1/run failing
+        # below. Keep the message specific rather than folding it into
+        # either of the generic engine-failure messages further down.
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
     price_delta = total["client_price"]
     cprice_delta = total["comp_price"]
     client_bid_price = 100.0 * (1.0 + price_delta)
 
     fee = resolve_fee(cur, pu["contract_type_id"], p1_option_id)
 
-    # Synthetic competitors -- confirmed against BuildInputJson_. Not real
-    # competitor identity or scores (see ddl/01_schema.sql NOTE-3): every
-    # entry is identical, fixed 85/85/85, one per bidder.
+    # Synthetic competitor construction (the fixed 85/85/85 "Avg Co N"
+    # rule, confirmed against BuildInputJson_) now happens ENGINE-SIDE:
+    # sending bidders alone reproduces the exact same rule, confirmed
+    # byte-identical by the engine team (engine v0.29+) and re-verified
+    # live this round -- see recalc.py's own migration notes. Not real
+    # competitor identity or scores either way (ddl/01_schema.sql
+    # NOTE-3); this is still the same synthetic construction, just no
+    # longer duplicated locally.
     bidder_count = max(int(pu["bidders"] or 1), 1)
-    comp_bid_price = 100.0 * (1.0 + cprice_delta)
-    competitors = [
-        {"name": f"Avg Co {i}", "bid_price": comp_bid_price,
-         "scores": {"Technical": 85.0, "Management": 85.0,
-                    "Past Performance": 85.0},
-         "bid_probability": 1.0}
-        for i in range(1, bidder_count + 1)
-    ]
 
     payload = {
         "uid": str(pu["id"]),
@@ -166,7 +178,7 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
         "p1_answer": p1_label,
         "eval_type": "Best Value",
         "market": pu["market_code"],
-        "competitors": competitors,
+        "bidders": bidder_count,
     }
 
     try:

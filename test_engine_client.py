@@ -12,12 +12,18 @@ the narrow IAM policy (/cda/clients/*/products/cpde-core/* only) exists
 to make safe to test directly: real keys, real client rows, real IAM
 denial, no mocking, no local stub.
 
-Section 5 locks in a real, live finding: a published engine integration
-reference's example payload uses short competitor-score keys
-(tech/mgmt/pp) that FAIL against the actual live engine (DAP solver
-error) for a real pursuit's real inputs -- recalc.py's existing long-key
-style (Technical/Management/Past Performance) is the one that works.
-See that section for the full story.
+Section 5 used to lock in a real, live finding about competitor-score
+key style (short tech/mgmt/pp keys failed the live DAP solver; the
+long Technical/Management/Past Performance style recalc.py sent
+worked). That hand-built competitors array is gone as of the
+fee/competitor migration -- recalc.py now sends bidders: N and lets
+the engine build the same synthetic competitors itself (engine
+v0.29+). Section 5 now independently verifies THAT claim live: the
+current bidders-only payload and the old hand-built long-key
+competitors array are both run against the same real pursuit on the
+same live engine, and the two pwin results are confirmed identical --
+not just trusted from the engine team's own "byte-identical" claim,
+same discipline as the original short/long key finding above.
 
     python test_engine_client.py
 
@@ -124,21 +130,19 @@ def main():
               "AccessDenied" in type(exc).__name__ or "AccessDenied" in str(exc),
               f"got {type(exc).__name__}: {exc}")
 
-    print("\n=== 5. competitor score keys -- locks in the CONFIRMED-correct "
-          "style against the live engine (not the reference doc's example) ===")
-    # A published integration reference showed synthetic-competitor
-    # scores as {"tech": .., "mgmt": .., "pp": ..}; recalc.py has always
-    # sent {"Technical": .., "Management": .., "Past Performance": ..}
-    # (ported from BuildInputJson_). Verified live, directly: sending
-    # THIS payload's competitors under the reference doc's short keys
-    # makes the live engine's DAP solver fail outright
-    # (solver_succeeded=false, "negative DAP" for every competitor) --
-    # the long keys recalc.py already sends are the ones the engine
-    # actually reads correctly. This locks that in so a future "helpful"
-    # fix toward the doc's example does not silently break every
-    # Recalculate Pwin call.
+    print("\n=== 5. bidders: N vs. the old hand-built competitors array -- "
+          "independently confirmed identical against the live engine ===")
+    # Pre-migration, recalc.py hand-built a synthetic competitors array
+    # (fixed 85/85/85 "Avg Co N" scores, one per bidder, long
+    # Technical/Management/Past Performance keys -- confirmed against
+    # BuildInputJson_). The fee/competitor migration replaced that with
+    # sending bidders: N and letting the engine build the identical
+    # array itself (engine v0.29+, "confirmed byte-identical" by the
+    # engine team). Not taken on trust: both payloads are run live
+    # against the same real pursuit on the same real engine below, and
+    # the two pwin results are compared directly.
     from app.db import tenant_tx
-    from app import recalc as recalc_module
+    from app import recalc as recalc_module, scoring
 
     AERO_ID = str(aero_row["id"])
     PURSUIT_ID = None
@@ -165,6 +169,11 @@ def main():
         recalc_module.call_run = capturing_call_run
         prior_url_override = os.environ.pop("CPDE_ENGINE_URL", None)
         try:
+            # recalculate_pwin() needs a loaded scoring table now
+            # (scoring.py's live-fetch migration) -- a real fetch
+            # against the same live engine this whole section is
+            # already testing against, not a mock.
+            asyncio.run(scoring.refresh(aero_row))
             with tenant_tx(AERO_ID) as cur:
                 asyncio.run(recalc_module.recalculate_pwin(
                     cur, str(PURSUIT_ID), None, persist=False))
@@ -174,40 +183,62 @@ def main():
                 os.environ["CPDE_ENGINE_URL"] = prior_url_override
 
         payload_current = captured.get("payload")
-        current_keys = (set(payload_current["competitors"][0]["scores"])
-                        if payload_current and payload_current.get("competitors") else set())
-        check("recalc.py's current outgoing competitor score keys are "
-              "the long style (Technical/Management/Past Performance)",
-              current_keys == {"Technical", "Management", "Past Performance"},
-              f"got {current_keys}")
+        check("recalc.py's current outgoing payload has NO hand-built "
+              "'competitors' key -- construction happens engine-side now",
+              payload_current is not None and "competitors" not in payload_current,
+              f"got keys {list(payload_current.keys()) if payload_current else None}")
+        check("recalc.py's current outgoing payload sends 'bidders' "
+              "instead", payload_current is not None and "bidders" in payload_current,
+              f"got keys {list(payload_current.keys()) if payload_current else None}")
 
         if payload_current is not None:
-            payload_wrong = copy.deepcopy(payload_current)
-            key_map = {"Technical": "tech", "Management": "mgmt", "Past Performance": "pp"}
-            for comp in payload_wrong["competitors"]:
-                comp["scores"] = {key_map.get(k, k): v for k, v in comp["scores"].items()}
+            # Reconstruct the OLD hand-built array exactly as recalc.py
+            # used to send it (git history, pre-migration), from the
+            # SAME captured tech/mgmt/pp/price/fee/etc inputs, so the
+            # only variable between the two live calls is competitors
+            # vs. bidders.
+            bidder_count = payload_current["bidders"]
+            cprice_delta = payload_current["cprice_delta"]
+            comp_bid_price = 100.0 * (1.0 + cprice_delta)
+            payload_old_style = {k: v for k, v in payload_current.items()
+                                 if k != "bidders"}
+            payload_old_style["competitors"] = [
+                {"name": f"Avg Co {i}", "bid_price": comp_bid_price,
+                 "scores": {"Technical": 85.0, "Management": 85.0,
+                            "Past Performance": 85.0},
+                 "bid_probability": 1.0}
+                for i in range(1, bidder_count + 1)
+            ]
 
             async def run_both():
                 os.environ.pop("CPDE_ENGINE_URL", None)
                 try:
-                    r_current = await engine_client.call_run(captured["client_row"], payload_current)
-                    r_wrong = await engine_client.call_run(captured["client_row"], payload_wrong)
+                    r_bidders = await engine_client.call_run(captured["client_row"], payload_current)
+                    r_old = await engine_client.call_run(captured["client_row"], payload_old_style)
                 finally:
                     if prior_url_override is not None:
                         os.environ["CPDE_ENGINE_URL"] = prior_url_override
-                return r_current, r_wrong
+                return r_bidders, r_old
 
-            r_current, r_wrong = asyncio.run(run_both())
-            check("the CURRENT (long-key) request solves successfully "
+            r_bidders, r_old = asyncio.run(run_both())
+            check("the CURRENT bidders:N request solves successfully "
                   "against the live engine",
-                  r_current.get("solver_succeeded") is True,
-                  f"got {r_current}")
-            check("the reference doc's short-key style FAILS against the "
-                  "same live engine for the same pursuit -- confirms the "
-                  "keys are not interchangeable, and confirms which side "
-                  "is actually correct",
-                  r_wrong.get("solver_succeeded") is False,
-                  f"got {r_wrong}")
+                  r_bidders.get("solver_succeeded") is True,
+                  f"got {r_bidders}")
+            check("the OLD hand-built competitors array also solves "
+                  "successfully (both requests are actually comparable, "
+                  "neither silently errored)",
+                  r_old.get("solver_succeeded") is True,
+                  f"got {r_old}")
+            check("bidders:N produces an IDENTICAL pwin to the old "
+                  "hand-built competitors array -- independently "
+                  "verified live, not just taken on the engine team's "
+                  "word",
+                  r_bidders.get("solver_succeeded") is True
+                  and r_old.get("solver_succeeded") is True
+                  and abs(r_bidders.get("pwin", -1) - r_old.get("pwin", -2)) < 1e-9,
+                  f"bidders pwin={r_bidders.get('pwin')}, "
+                  f"old-style pwin={r_old.get('pwin')}")
 
     print(f"\n{'='*58}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
