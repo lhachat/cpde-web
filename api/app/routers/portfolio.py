@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
 from ..plan_scope import exclude_test_fixtures, resolve_license_boundary_nodes
+from .. import scoring
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 
@@ -148,6 +149,19 @@ async def reference(p: Principal = Depends(current_principal)):
               JOIN question q ON q.id = o.question_id
              WHERE q.code = 'P1' AND o.is_active
              ORDER BY o.display_order""")
+    # Question text, cascade rules and help (engine v0.32+, scoring.py's
+    # own live-fetched cache) -- None if the scoring/questionnaire cache
+    # has never successfully loaded. Deliberately NOT a 502 for the
+    # whole endpoint: markets/contract types/etc. above come straight
+    # from the database and have nothing to do with the engine being
+    # reachable -- a scoring-fetch outage should not also take down
+    # every other dropdown this endpoint serves. The frontend's own
+    # questionnaire rendering already treats a missing REF.questionnaire
+    # the same way it treats REF not being loaded yet at all.
+    try:
+        questionnaire = scoring.get_questionnaire()
+    except scoring.ScoringTableError:
+        questionnaire = None
     return {
         "markets": markets,
         "opportunity_types": opp_types,
@@ -160,6 +174,7 @@ async def reference(p: Principal = Depends(current_principal)):
         "bid_decisions": [{"code": "BID", "label": "Bid"},
                           {"code": "NO_BID", "label": "No bid"},
                           {"code": "UNDECIDED", "label": "Undecided"}],
+        "questionnaire": questionnaire,
     }
 
 

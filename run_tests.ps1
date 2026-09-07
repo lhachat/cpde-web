@@ -34,6 +34,18 @@ Write-Host "`n########## FEE/COMPETITOR MIGRATION ##########" -ForegroundColor C
 python test_fee_competitor_migration.py --admin-dsn $ADMIN
 if ($LASTEXITCODE -ne 0) { $fail = 1 }
 
+# Needs the API running on :8001 -- section 3 confirms GET /api/reference
+# actually exposes the questionnaire live, not just that scoring.py's
+# own in-process logic works. Skipped, not failed, if the API is down.
+Write-Host "`n########## QUESTIONNAIRE MIGRATION ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    python test_questionnaire_migration.py --admin-dsn $ADMIN
+    if ($LASTEXITCODE -ne 0) { $fail = 1 }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
 # Needs the API running on :8001. Skipped if it is not up, because a
 # skipped suite you know about beats a red run you learn to ignore.
 Write-Host "`n########## API SECURITY ##########" -ForegroundColor Cyan
@@ -96,6 +108,21 @@ if ($LASTEXITCODE -eq 0) {
     docker exec cpde-api python /tmp/test_engine_client.py
     if ($LASTEXITCODE -ne 0) { $fail = 1 }
     docker exec cpde-api rm -f /tmp/test_engine_client.py | Out-Null
+} else {
+    Write-Host "SKIPPED - no live AWS session in the api container; run .\refresh-aws-creds.ps1 first" -ForegroundColor Yellow
+}
+
+# Same reasoning as ENGINE CLIENT above -- needs a real fetch against
+# the live engine to confirm the tm1a_tm1b_to_tm2 cascade fix (v0.33)
+# actually landed, not a stale cached v0.32 payload. Run inside the API
+# container, where the real credentials live.
+Write-Host "`n########## TM1A+TM1B->TM2 CASCADE RE-VERIFICATION ##########" -ForegroundColor Cyan
+docker exec cpde-api python -c "import boto3; boto3.client('sts').get_caller_identity()" 2>$null
+if ($LASTEXITCODE -eq 0) {
+    docker cp test_tm1a_tm1b_tm2_cascade.py cpde-api:/tmp/test_tm1a_tm1b_tm2_cascade.py | Out-Null
+    docker exec cpde-api python /tmp/test_tm1a_tm1b_tm2_cascade.py --admin-dsn "postgresql://cpde:localdev@cpde-db:5432/cpde"
+    if ($LASTEXITCODE -ne 0) { $fail = 1 }
+    docker exec cpde-api rm -f /tmp/test_tm1a_tm1b_tm2_cascade.py | Out-Null
 } else {
     Write-Host "SKIPPED - no live AWS session in the api container; run .\refresh-aws-creds.ps1 first" -ForegroundColor Yellow
 }

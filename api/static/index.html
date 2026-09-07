@@ -811,6 +811,7 @@ function vDash(){
 /* ---------- Pursuits ---------- */
 let sortKey='value',sortDir=-1,selUid=null;
 let pageSize=50, page=1, detailMode=false;
+let historyUid=null;   // which pursuit #histBody's current content belongs to
 let FLT={market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:'',sole:''};
 // Navigate from the dashboard summary to Pursuits, pre-filtered.
 // Resets every other filter first: arriving with a stale filter from an
@@ -995,53 +996,87 @@ function vPursuits(){
   b('#pgNext',()=>go(Math.min(pages,page+1))); b('#pgLast',()=>go(pages));
 }
 
-/* Question prompts \u2014 verbatim from PwinForm control captions.
-   TM1a/TM1b vary by opportunity type (IsDevOrExistingProduct). */
-const QSEC={'TM 1a':'Technical & Management','TM 1b':'Technical & Management',
- 'TM 2':'Technical & Management','TM 3':'Technical & Management','TM 4':'Technical & Management',
- 'TM 5':'Technical & Management','PP 1':'Past Performance','P 1':'Price','P 2':'Price'};
-const QTXT={
- 'TM 1a':{PRODUCT:'1a.  Does our product perform better than our competitor?',
-          SERVICES:'1a.  Have we done a job like this before?'},
- 'TM 1b':{PRODUCT:'1b.  Is our Technical Solution more mature than competitors?',
-          SERVICES:'1b.  Have our competitors done a job like this before?'},
- 'TM 2':'2.  Is there an incumbent?',
- 'TM 3':'3.  Is the incumbent well-performing?',
- 'TM 4':'4.  Will we need a teammate in order to bid key aspects of the job?',
- 'TM 5':'5.  Do we plan to invest (other than B&P) to increase competitiveness prior to RFP release?',
- 'PP 1':'1.  Do we have any performance issues on similar contracts within the last 3 years?',
- 'P 1':'1.  How far above/below a normal bid are we planning for this proposal?',
- 'P 2':'2.  Is this Best Value or LPTA?'};
+/* Question prompts, offered options, cascade rules and help all come
+   from the engine's live GET /v1/scoring-tables (engine v0.32+,
+   questionnaire key), via buildQuestionnaireFromRef() below -- NOT
+   hardcoded here any more. QSEC/QTXT/QOPT/HELP/TM3_BY_TM2 start empty
+   and are populated once REF loads, same lifecycle every other
+   REF-derived dropdown in this app already follows (REF itself is
+   null until loadReference() resolves). Offered options and this
+   app's own scoring keys serialize from the SAME underlying engine
+   table by construction, so cpde-web cannot present an answer option
+   the engine has no score for. */
+let QSEC={}, QTXT={}, QOPT={}, HELP={}, TM3_BY_TM2={};
+// The two option-shaped cascade rules (tm1a->tm1b, tm1a+tm1b->tm2) --
+// populated from questionnaire.cascades, not typed by hand. TM3_BY_TM2
+// (the third rule, a full answer->options map) needs no separate
+// holder; it IS the shape optionsFor() already consumes directly.
+let _CASCADE_TM1B_REMOVE=null, _CASCADE_TM2_FORCE=null;
 const isProd=t=>{t=(t||'').toLowerCase();return t.includes('product')||t.includes('dev');};
 function qPrompt(k,type){const v=QTXT[k];
   return typeof v==='string'?v:(isProd(type)?v.PRODUCT:v.SERVICES);}
 
+/* Builds QSEC/QTXT/QOPT/HELP/TM3_BY_TM2 and the two cascade values from
+   REF.questionnaire -- called once loadReference() resolves. Question
+   order matches the engine's own questions array (the same order
+   PwinForm/the VBA source presents them in); the pursuit_context
+   fields (pursuit_type, contract_type, bidders, market) are NOT added
+   to QOPT/QSEC -- those aren't scored questionnaire fields and
+   continue to render via their own existing dropdowns/inputs -- but
+   Bidders' and Market's HELP entries ARE pulled from here, since both
+   already have (or, for Market, explicitly lack) real help text in
+   the SAME spec. */
+const QID_TO_KEY={tm1a:'TM 1a',tm1b:'TM 1b',tm2:'TM 2',tm3:'TM 3',tm4:'TM 4',
+  tm5:'TM 5',pp1:'PP 1',p1:'P 1',p2:'P 2'};
+function buildQuestionnaireFromRef(){
+  const spec=REF&&REF.questionnaire;
+  if(!spec) return;
+  const secLabel=spec.sections||{};
+  const q2={},t2={},o2={},h2={};
+  spec.questions.forEach(item=>{
+    const key=QID_TO_KEY[item.id];
+    const help=item.help;
+    if(key){
+      q2[key]=secLabel[item.section]||item.section;
+      t2[key]=typeof item.text==='object'?{PRODUCT:item.text.product,SERVICES:item.text.services}:item.text;
+      o2[key]=Array.isArray(item.options)?item.options
+             :(item.options?{PRODUCT:item.options.product,SERVICES:item.options.services}:[]);
+      h2[key]=!help?null
+             :('title' in help?[help.title,help.body]
+              :{PRODUCT:[help.product.title,help.product.body],SERVICES:[help.services.title,help.services.body]});
+    } else if(item.id==='bidders'){
+      h2['Bidders']=help?[help.title,help.body]:null;
+    } else if(item.id==='market'){
+      h2['Market']=help?[help.title,help.body]:null;
+    }
+  });
+  QSEC=q2; QTXT=t2; QOPT=o2; HELP=h2;
+  const casc=spec.cascades||{};
+  TM3_BY_TM2=(casc.tm2_to_tm3&&casc.tm2_to_tm3.map)||{};
+  _CASCADE_TM1B_REMOVE=casc.tm1a_to_tm1b&&casc.tm1a_to_tm1b.rule
+    &&casc.tm1a_to_tm1b.rule.remove_option&&casc.tm1a_to_tm1b.rule.remove_option.option;
+  _CASCADE_TM2_FORCE=casc.tm1a_tm1b_to_tm2&&casc.tm1a_tm1b_to_tm2.rule
+    &&casc.tm1a_tm1b_to_tm2.rule.force_options&&casc.tm1a_tm1b_to_tm2.rule.force_options.options;
+}
 
 /* Shared questionnaire renderer.
-   Enforces every PwinForm gate:
+   Enforces every PwinForm gate, all three confirmed against the
+   engine's own live cascade rules (questionnaire.cascades) as of this
+   migration, not just cpde-web's own prior reading of the VBA:
      - P2 = LPTA disables TM1a / TM1b
      - SERVICES only: TM1a = "No" removes TM1b "not as many building blocks as us"
      - SERVICES only: neither TM1a nor TM1b a "yes" => TM2 can only be "No"
      - ALL types: TM2 determines the TM3 option list exactly
    Source: PwinForm.frm UpdateTM1bOptions_ / UpdateTM2Options_ / CB_TM2_Change */
-const TM3_BY_TM2={
- 'Yes, us':['We are performing satisfactorily/unknown','We have performance issues'],
- 'Yes, one of the competitors':['Incumbent competitor is performing satisfactorily/unknown',
-                                'Incumbent competitor has performance issues'],
- 'No':['N/A']};
 function optionsFor(k,ans,type){
   const prod=isProd(type), svc=!prod;
-  let list=(QOPT[k]||[]).filter(o=>{
-    if(k==='TM 1a'||k==='TM 1b'){
-      const P=['Same','Better','Worse','Same Level','More Mature','Less Mature'];
-      return prod ? P.includes(o) : !P.includes(o);
-    }
-    return true;});
-  if(svc && k==='TM 1b' && ans['TM 1a']==='No')
-    list=list.filter(o=>o!=='Yes, but not as many building blocks as us');
+  const raw=QOPT[k]||[];
+  let list=(Array.isArray(raw)?raw:(prod?raw.PRODUCT:raw.SERVICES)||[]).slice();
+  if(svc && k==='TM 1b' && ans['TM 1a']==='No' && _CASCADE_TM1B_REMOVE)
+    list=list.filter(o=>o!==_CASCADE_TM1B_REMOVE);
   if(svc && k==='TM 2'){
     const yA=ans['TM 1a']&&ans['TM 1a']!=='No', yB=ans['TM 1b']&&ans['TM 1b']!=='No';
-    if(!yA&&!yB) list=['No'];
+    if(!yA&&!yB) list=(_CASCADE_TM2_FORCE||['No']).slice();
   }
   if(k==='TM 3') list=TM3_BY_TM2[ans['TM 2']]||['N/A'];
   return list;
@@ -1086,16 +1121,6 @@ function renderQ(ans,baseAns,type,editable){
       </select></div>`;});
   return out;
 }
-const QOPT={
- 'TM 1a':['Same','Better','Worse','On contract today','Yes, but not as many building blocks as competitor','No, but our teammates are on contract today','No'],
- 'TM 1b':['Same Level','More Mature','Less Mature','On contract today','Yes, but not as many building blocks as us','No'],
- 'TM 2':['Yes, us','Yes, one of the competitors','No'],
- 'TM 3':['We are performing satisfactorily/unknown','We have performance issues','N/A','Incumbent competitor is performing satisfactorily/unknown','Incumbent competitor has performance issues'],
- 'TM 4':['Yes, we will outsource most of the actual work requested ("noble work")','Yes, we will outsource some of the actual work requested ("noble work")','No'],
- 'TM 5':['No','Low','Moderate','High'],
- 'PP 1':['Yes','No'],
- 'P 1':['3% above normal','2% above normal','1% above normal','Normal Bid','1% lower than normal','2% lower than normal','3% lower than normal','4% lower than normal'],
- 'P 2':['Best Value','LPTA']};
 function detailView(uid){
   const r=P.find(x=>x.uid===uid);
   if(!r){                      // filtered out, or an id that no longer exists
@@ -1103,6 +1128,23 @@ function detailView(uid){
     toast('That pursuit is no longer available.', true);
     return;
   }
+  // A re-render of the SAME pursuit (e.g. triggered by saveBid()'s own
+  // render() after an unrelated bid toggle) throws away this whole
+  // #pursuits subtree and rebuilds it from scratch -- #histBody included,
+  // even though its already-loaded change-history table has nothing to
+  // do with whatever just changed. Starting it EMPTY again every time
+  // momentarily collapses page height by however tall that table is
+  // (confirmed live via a frame-by-frame trace: 3498px -> 1621px for one
+  // paint), and the browser clamps scrollY to fit the shrunk page and
+  // never restores it once the content grows back -- the real cause of
+  // the pursuit detail view's scroll jump on any action that re-renders
+  // it. Carrying the EXISTING table forward as the starting content
+  // (only for the SAME pursuit -- historyUid guards against showing a
+  // different pursuit's stale history for an instant) means there is
+  // nothing to collapse; loadHistory() below still refreshes it, just
+  // without ever emptying it first.
+  const histEl = document.getElementById('histBody');
+  const preservedHistory = (historyUid===uid && histEl) ? histEl.innerHTML : '';
   const idx=[...P].findIndex(x=>x.uid===uid);
   const s5=r.years.reduce((a,y)=>({rev:a.rev+y.rev,fee:a.fee+y.fee,bp:a.bp+y.bp,inv:a.inv+y.inv}),
     {rev:0,fee:0,bp:0,inv:0});
@@ -1234,9 +1276,9 @@ function detailView(uid){
      ${(priorAmt||laterAmt)?'Amounts outside the five-year planning window are derived from probabilistic award less the sum of the in-window years.':'Entire period of performance falls inside the planning window.'}</div></div>
   <div class="card"><h3>Change history
      <small>every write is recorded by the database, not by the application</small></h3>
-   <div id="histBody"></div></div>`;
+   <div id="histBody">${preservedHistory}</div></div>`;
   presenceStart(r.id);
-  loadHistory(r.id);
+  loadHistory(r.id, uid);
   if(!REF) loadReference().then(()=>detailView(uid)).catch(e=>toast(e.message,true));
   if(r.stage && r.stage !== 'Pre-BH' && !r.sole) wireBhPtwCard(uid, r);
 
@@ -1296,8 +1338,16 @@ function detailView(uid){
     await setOutcome(uid, v || null, false);
   };
   const db=$('#dBid'); if(db) db.onchange=async e=>{
-    await saveBid(uid, e.target.checked);
-    detailView(uid);};
+    // saveBid() already calls render() internally, which re-renders THIS
+    // detail view too (vPursuits() picks detailView() via detailMode) --
+    // a second, redundant detailView(uid) here was a SECOND full innerHTML
+    // rebuild of the same container back-to-back. Real, measured effect:
+    // scrollY moved from 1449 to 781 on toggle even though document
+    // height and max scroll were unchanged and no window.scrollTo call
+    // fired -- consistent with the browser's scroll-anchoring heuristic
+    // getting confused by two rapid full-DOM replacements of the same
+    // container rather than one.
+    await saveBid(uid, e.target.checked);};
   $('#dCalc').onclick=()=>recalculatePwin(uid);
   const step=d=>{const list=[...P]; const i=list.findIndex(x=>x.uid===uid);
     const n=list[(i+d+list.length)%list.length];
@@ -2074,6 +2124,14 @@ async function sbRecalcOne(uid){
 function sbQ(uid){
   const x=P.find(p=>p.uid===uid),s=SB[uid];
   if(!x||!s){ sbSel=null; return; }
+  // Sandbox can be the very FIRST view a session ever renders a
+  // questionnaire in -- unlike detailView(), which already guards this,
+  // nothing here previously needed to, because QOPT/QTXT/HELP used to
+  // be hardcoded constants always available regardless of REF. Now that
+  // they come from REF.questionnaire (see buildQuestionnaireFromRef()),
+  // opening Sandbox and picking a pursuit before ever opening one from
+  // the Pursuits list would otherwise render every question blank.
+  if(!REF){ loadReference().then(()=>sbQ(uid)).catch(e=>toast(e.message,true)); return; }
   const kids=DEPENDENTS[uid]||[], parent=DEPS_OF[uid];
   const nch=Object.keys(x.answers).filter(k=>s.ans[k]!==x.answers[k]).length;
   $('#sbq').innerHTML=`<div class="card"><h3>Pwin questionnaire \u2014 ${x.name}
@@ -2260,70 +2318,55 @@ function show(v){cur=v;
 $$('#nav a').forEach(a=>a.onclick=()=>{presenceStop();show(a.dataset.v);});
 window.addEventListener('beforeunload', presenceStop);
 
+/* ---------- bid toggle: stop the page from scrolling on click ----------
+   Focusing a checkbox (native behavior when a bid-toggle label is
+   clicked, on BOTH the pursuits list and the pursuit detail view) makes
+   the browser scroll it into view -- even when it is already fully
+   visible, and confirmed live to happen in more than one step (once
+   immediately on focus, and again separately if that same checkbox's
+   DOM node gets destroyed and replaced moments later by saveBid()'s own
+   re-render). Neither passing {preventScroll:true} to our own focus()
+   call nor a single synchronous or single requestAnimationFrame-deferred
+   restore reliably wins against every stage of that -- confirmed by
+   testing each in isolation. Tracking the last KNOWN-GOOD scroll
+   position continuously (paused only while actively guarding one
+   checkbox interaction) and restoring it across several layered timings
+   is what actually held in live testing. Delegated from `document` once,
+   here, rather than rebound per render -- it must survive every full
+   innerHTML replace this app's views do. */
+(function(){
+  let lastGoodX = window.scrollX, lastGoodY = window.scrollY;
+  let guarding = false;
+  window.addEventListener('scroll', ()=>{
+    if(!guarding){ lastGoodX = window.scrollX; lastGoodY = window.scrollY; }
+  });
+  document.addEventListener('focusin', e=>{
+    if(e.target.tagName !== 'INPUT' || e.target.type !== 'checkbox') return;
+    guarding = true;
+    const x = lastGoodX, y = lastGoodY;
+    const restore = ()=>window.scrollTo(x, y);
+    requestAnimationFrame(restore);
+    requestAnimationFrame(()=>requestAnimationFrame(restore));
+    setTimeout(restore, 0);
+    setTimeout(restore, 30);
+    setTimeout(restore, 100);
+    setTimeout(()=>{ guarding = false; }, 150);
+  });
+})();
+
 
 
 
 /* ---------- question help ----------
-   Ported verbatim in substance from PwinForm.ShowHelp_. TM1a and TM1b have
-   separate text per opportunity type, exactly as the form does. */
-const HELP = {
- 'TM 1a': {
-  PRODUCT:['1a. Does our product perform better than our competitor?',
-   "Compare your product's performance specifications directly against the competitor most likely to win.\n\n"+
-   "\u2014 Better \u2014 Your product outperforms on the key technical criteria the customer cares about.\n"+
-   "\u2014 Same \u2014 Performance is roughly equivalent.\n"+
-   "\u2014 Worse \u2014 The competitor's product has a measurable performance advantage."],
-  SERVICES:['1a. Have we done a job like this before?',
-   "This question asks whether your company has direct experience performing work similar to this pursuit \u2014 not just related work, but the same type of job.\n\n"+
-   "\u2014 On contract today \u2014 You are currently performing this type of work for this or a similar customer.\n"+
-   "\u2014 Yes, but not as many building blocks as competitor \u2014 You have done similar work but your experience is less complete than your strongest competitor's.\n"+
-   "\u2014 No, but our teammates are on contract today \u2014 You don't have direct experience but a teaming partner does. Only select this if the teammate is doing the actual work, not just lending their name.\n"+
-   "\u2014 No \u2014 Neither you nor your teammates have relevant direct experience."]},
- 'TM 1b': {
-  PRODUCT:['1b. Is our Technical Solution more mature than competitors?',
-   "Maturity here means how far along your product is in development and field validation relative to competitors.\n\n"+
-   "\u2014 More Mature \u2014 Your product is further along in development, testing, or fielding than competitors.\n"+
-   "\u2014 Same Level \u2014 Roughly equivalent maturity.\n"+
-   "\u2014 Less Mature \u2014 A competitor has a more developed or proven solution."],
-  SERVICES:['1b. Have our competitors done a job like this before?',
-   "This mirrors Q1a but focuses on your strongest competitor's experience, not yours.\n\n"+
-   "\u2014 On contract today \u2014 Your primary competitor is currently performing this type of work.\n"+
-   "\u2014 Yes, but not as many building blocks as us \u2014 They have experience but yours is stronger.\n"+
-   "\u2014 No \u2014 Your primary competitor lacks direct relevant experience."]},
- 'TM 2': ['2. Is there an incumbent?',
-   "An incumbent is the company currently performing this work or a direct predecessor contract.\n\n"+
-   "\u2014 Yes, us \u2014 Your company holds the current contract.\n"+
-   "\u2014 Yes, one of the competitors \u2014 A competitor holds the current contract.\n"+
-   "\u2014 No \u2014 This is a new requirement with no current performer, or the previous contract has been completed long enough that incumbency is not a factor."],
- 'TM 3': ['3. Is the incumbent well-performing?',
-   "This answer is pre-filtered based on your Q2 response. You only need to assess performance for the incumbent identified \u2014 either your own or a competitor's.\n\n"+
-   "\u2014 Performing satisfactorily/unknown \u2014 The incumbent is meeting contract requirements, or you don't have enough information to know otherwise. When in doubt, select this option.\n"+
-   "\u2014 Performance issues \u2014 There is documented or widely known evidence of problems: schedule slips, quality issues, customer complaints, or a cure notice."],
- 'TM 4': ['4. Will we need a teammate to bid key aspects of the job?',
-   '"Noble work" refers to the core, highest-value technical work the customer is actually buying \u2014 not administrative or support tasks. The question is whether your company will perform that core work itself or hand it to a subcontractor.\n\n'+
-   "\u2014 Yes, outsource most \u2014 A subcontractor will perform the majority of the actual technical work. This significantly weakens your competitive position.\n"+
-   "\u2014 Yes, outsource some \u2014 You will perform the core work but need a teammate for meaningful portions of it.\n"+
-   "\u2014 No \u2014 Your company will perform all or nearly all of the key technical work directly."],
- 'TM 5': ['5. Do we plan to invest to increase competitiveness prior to RFP release?',
-   "This covers any planned spending beyond B&P \u2014 for example, hiring key personnel, funding IR&D, purchasing equipment, or making product enhancements specifically to strengthen this pursuit. The dollar ranges shown (Low/Moderate/High) are calculated as a percentage of the planned award value for this pursuit.\n\n"+
-   "\u2014 No \u2014 No additional investment planned beyond standard B&P.\n"+
-   "\u2014 Low / Moderate / High \u2014 Select the range that best matches your planned investment."],
- 'PP 1': ['Past Performance: Do we have performance issues on similar contracts within the last 3 years?',
-   '"Similar" means contracts of the same type and scope \u2014 same pursuit type, same customer agency, or same technical domain. You do not need a perfect match.\n\n'+
-   "\u2014 Yes \u2014 Your company has had documented performance problems on a comparable contract in the last 3 years: cure notices, terminations, significant schedule or cost overruns, or a poor CPARS rating.\n"+
-   "\u2014 No \u2014 No significant performance issues on comparable work in the last 3 years. If you are unsure, select No."],
- 'P 1': ['Price: How far above/below a normal bid are we planning?',
-   '"Normal bid" means your standard pricing for this type of work with your typical fee. Adjustments above normal mean you are pricing higher than usual \u2014 either because demand allows it or you want higher margin. Adjustments below normal mean you are pricing aggressively to increase your chances of winning.\n\n'+
-   "Select the option that best reflects your current pricing intent. This can be updated after Black Hat or PTW is complete."],
- 'P 2': ['Price: Is this Best Value or LPTA?',
-   "This is the source selection method the customer will use to evaluate proposals.\n\n"+
-   "\u2014 Best Value \u2014 The customer weighs both technical merit and price. A higher-priced bid can win if the technical solution is strong enough.\n"+
-   "\u2014 LPTA (Lowest Price Technically Acceptable) \u2014 Once a bid meets the minimum technical threshold, the lowest price wins. Technical superiority beyond the minimum does not help you.\n\n"+
-   "If you are unsure, check the draft RFP or Sources Sought. Default to Best Value if the evaluation method has not been announced."],
- 'Bidders': ['Other: How many competitors are we expecting?',
-   "Enter the number of other companies you expect to submit a proposal, not including your own company. If you are unsure, use your best estimate based on industry knowledge and any RFI responses. This number directly affects the Pwin calculation \u2014 more competitors lowers your baseline probability."],
-};
-
+   HELP is populated by buildQuestionnaireFromRef() from the engine's
+   live questionnaire.help (engine v0.32+) -- see that function, above.
+   No local copy here any more: TM1a/TM1b still carry separate text per
+   opportunity type, and Market's entry is null (confirmed real in the
+   source -- it has no help text -- not fabricated by cpde-web), exactly
+   as the fetched spec says. showHelp() itself needs no change: it
+   already handles a null HELP[code] (no popup) and an
+   {PRODUCT,SERVICES} vs. plain [title,body] shape generically,
+   regardless of where the data came from. */
 window.showHelp = function(code, type){
   let e = HELP[code];
   if(!e) return;
@@ -2369,6 +2412,7 @@ async function loadReference(){
   const r = await fetch('/api/reference', {credentials:'same-origin'});
   if(!r.ok) throw new Error('reference data unavailable');
   REF = await r.json();
+  buildQuestionnaireFromRef();
   return REF;
 }
 
@@ -2694,15 +2738,23 @@ function hideChangeBanner(){
   if(el) el.classList.remove('show');
 }
 
-async function loadHistory(pursuitId){
+async function loadHistory(pursuitId, uid){
   const el = document.getElementById('histBody');
   if(!el) return;
-  el.innerHTML = '<div class="note">Loading\u2026</div>';
+  // detailView() carries the existing table forward as #histBody's
+  // starting content when re-rendering the SAME pursuit (see its own
+  // comment on preservedHistory for the full story -- this is the other
+  // half: only a genuine first load for this pursuit (nothing preserved,
+  // el really is empty) shows the placeholder; a refresh of an already-
+  // shown table just replaces it in place once the fetch resolves, no
+  // intermediate empty state.
+  if(!el.innerHTML) el.innerHTML = '<div class="note">Loading\u2026</div>';
   try{
     const r = await fetch(`/api/pursuits/${pursuitId}/history`,
       {credentials:'same-origin'});
     if(!r.ok) throw new Error('history unavailable');
     const rows = await r.json();
+    historyUid = uid;   // this pursuit's history is now genuinely current
     if(!rows.length){ el.innerHTML =
       '<div class="note">No recorded changes since this pursuit was imported.</div>';
       return; }
@@ -2715,6 +2767,7 @@ async function loadHistory(pursuitId){
         <td>${formatDiff(h.changed_fields)}</td></tr>`).join('') +
       `</tbody></table></div>`;
   }catch(e){
+    historyUid = null;  // do not carry a failed load forward as if it were real
     el.innerHTML = `<div class="note">Could not load history: ${e.message}</div>`;
   }
 }

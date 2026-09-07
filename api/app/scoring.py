@@ -45,6 +45,21 @@ returns tables.tm5.dev / tables.tm5.service, each a fully-formed row
 per answer, confirmed by reading the live response directly. Only the
 DECISION of which branch applies (from the pursuit's type_group) stays
 local; the numbers themselves no longer do.
+
+QUESTIONNAIRE (engine v0.32+): the same response also carries a
+questionnaire key -- 13 fields (9 scored TM/PP/P questions plus
+pursuit_type/contract_type/bidders/market under a separate
+pursuit_context section), 4 section labels, the 3 real cascade rules
+(TM2->TM3, plus TM1a->TM1b and TM1a+TM1b->TM2, confirmed against
+PwinForm.frm and cross-corroborated against the Salesforce plugin's
+independent port), and per-question help (title+body, or null where
+none exists -- e.g. Market). This retired cpde-web's own hardcoded
+question text, cascade logic, and HELP object entirely (index.html);
+offered options and this module's own scoring keys now serialize from
+the SAME underlying table by construction, so cpde-web cannot present
+an answer option the engine has no score for. get_questionnaire()
+hands the raw spec straight through to GET /api/reference for the
+frontend to consume -- see index.html's buildQuestionnaireFromRef().
 """
 from __future__ import annotations
 
@@ -83,6 +98,14 @@ BASE_SCORE: float | None = None
 # _tables/BASE_SCORE -- one response, one refresh, never partially
 # updated relative to each other.
 _fee_rates: dict | None = None
+# Raw questionnaire spec (engine v0.32+): {sections, questions, cascades}
+# -- question prompts, per-question help (title+body, or null), answer
+# options, and the 3 cascade rules, all confirmed against the real VBA
+# source (PwinForm.frm). Presentation data, not lookup keys -- stored
+# AS-IS, unlike _tables/_fee_rates, which get lowercased for case-
+# insensitive matching. See get_questionnaire()/fee_rate_for_label() for
+# how each half of this same response is actually consumed.
+_questionnaire: dict | None = None
 _last_fetched: float = 0.0
 
 
@@ -95,7 +118,7 @@ async def refresh(client_row: dict) -> None:
     in-process cache. Raises ScoringTableError on failure and leaves
     whatever was cached before UNCHANGED -- a failed refresh never wipes
     out a previously-good table, and never partially updates it."""
-    global _tables, BASE_SCORE, _fee_rates, _last_fetched
+    global _tables, BASE_SCORE, _fee_rates, _questionnaire, _last_fetched
     try:
         data = await engine_client.call_get_scoring_tables(client_row)
     except Exception as exc:
@@ -114,11 +137,29 @@ async def refresh(client_row: dict) -> None:
     _tables = normalized
     BASE_SCORE = data["base_score"]
     _fee_rates = _normalize(data.get("fee_rates", {}))
+    _questionnaire = data.get("questionnaire")
     _last_fetched = time.monotonic()
 
 
 def is_loaded() -> bool:
     return _tables is not None
+
+
+def get_questionnaire() -> dict:
+    """The raw {sections, questions, cascades} spec (engine v0.32+), for
+    /api/reference to hand straight to the frontend -- presentation
+    data, passed through as-is (not lowercased/keyed like _tables),
+    since the caller needs the real casing to display and the cascade
+    rules reference option text that must match exactly.
+
+    Raises ScoringTableError if no fetch has ever succeeded, same
+    discipline as lookup()/fee_rate_for_label() -- a caller must never
+    silently render an empty or stale questionnaire."""
+    if _questionnaire is None:
+        raise ScoringTableError(
+            "questionnaire spec has not been loaded from the engine yet -- "
+            "cannot render the Pwin questionnaire until a fetch succeeds")
+    return _questionnaire
 
 
 def fee_rate_for_label(contract_type_label: str) -> float | None:
