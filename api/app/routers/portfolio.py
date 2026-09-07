@@ -266,7 +266,9 @@ async def pursuit_detail(pursuit_id: str,
                    d.name AS depends_on_name,
                    p.updated_at, ub.email AS updated_by_email,
                    ub.display_name AS updated_by_name,
-                   p.created_at, cb.email AS created_by_email
+                   p.created_at, cb.email AS created_by_email,
+                   p.org_node_id, p.owner_user_id,
+                   ow.email AS owner_email, ow.display_name AS owner_name
               FROM pursuit p
               LEFT JOIN market m ON m.id = p.market_id
               LEFT JOIN contract_type ct ON ct.id = p.contract_type_id
@@ -277,6 +279,7 @@ async def pursuit_detail(pursuit_id: str,
               LEFT JOIN pursuit d ON d.id = p.depends_on_pursuit_id
               LEFT JOIN app_user ub ON ub.id = p.updated_by
               LEFT JOIN app_user cb ON cb.id = p.created_by
+              LEFT JOIN app_user ow ON ow.id = p.owner_user_id
              WHERE p.id = %s AND {SCOPED}""", (pursuit_id, p.user_id))
         if not row:
             # Same 404 whether it does not exist or is out of scope.

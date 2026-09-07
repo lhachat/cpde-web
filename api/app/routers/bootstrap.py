@@ -23,7 +23,8 @@ from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
 from ..plan_scope import (assignable_pursuit_org_nodes, dashboard_scope_node_ids,
                           dashboard_scope_options, exclude_test_fixtures,
-                          resolve_dashboard_node, resolve_license_boundary_nodes)
+                          owner_candidates_by_org_node, resolve_dashboard_node,
+                          resolve_license_boundary_nodes)
 from .staffing import (_pursuit_filter, apply_cutoff, client_escalation_rates,
                        compute_phase_dates, monthly_contributions)
 
@@ -100,9 +101,12 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
                    d.name AS dep_name,
                    p.updated_at, ub.email AS updated_by_email,
                    ub.display_name AS updated_by_name,
-                   org.code AS org_unit_code, org.name AS org_unit_name
+                   p.org_node_id, org.code AS org_unit_code, org.name AS org_unit_name,
+                   p.owner_user_id, ow.email AS owner_email,
+                   ow.display_name AS owner_name
               FROM pursuit p
               LEFT JOIN app_user ub ON ub.id = p.updated_by
+              LEFT JOIN app_user ow ON ow.id = p.owner_user_id
               LEFT JOIN market m ON m.id = p.market_id
               LEFT JOIN opportunity_type ot ON ot.id = p.opportunity_type_id
               LEFT JOIN contract_type ct ON ct.id = p.contract_type_id
@@ -115,6 +119,20 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
                AND p.org_node_id = ANY(%s::uuid[])
              ORDER BY p.planned_total_award_value DESC NULLS LAST""",
             (p.user_id, dash_scope_ids))
+
+        # Owner/POC picker candidates -- scoped to each PURSUIT's own org
+        # node (fn_user_has_scope-based), not the caller's own scope and
+        # not every user in the tenant. Built once here, for every
+        # distinct org node the caller's own visible pursuits actually
+        # span, keyed by org_unit_code (already on every pursuit row
+        # above) so the frontend can look candidates up directly from
+        # r.org_unit_code without a second round trip.
+        node_id_to_code = {str(row["org_node_id"]): row["org_unit_code"]
+                          for row in pursuits}
+        candidates_by_node = owner_candidates_by_org_node(
+            cur, list(node_id_to_code.keys()))
+        owner_candidates = {node_id_to_code[nid]: cands
+                            for nid, cands in candidates_by_node.items()}
 
         years = fetch_all(cur, f"""
             SELECT yp.pursuit_id, yp.year_offset AS y, yp.calendar_year,
@@ -310,4 +328,9 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
         },
         "scope_targets": scope_targets,
         "org_units": org_units,
+        # Owner/POC picker options, per org unit code -- see the note
+        # above the query that builds it. Keyed by org_unit_code so the
+        # pursuit edit form can look candidates up directly from the
+        # pursuit's own r.org_unit_code, no second request.
+        "owner_candidates": owner_candidates,
     }

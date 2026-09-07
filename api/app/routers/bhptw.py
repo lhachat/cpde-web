@@ -197,10 +197,19 @@ async def submit_black_hat(
             (pursuit_id, body.scenario, p.user_id, body.base_pwin,
              pwin_val, body.investment, body.completed_date, opt["id"]))
 
+        # planned_investment kept in sync the same way planned_fee_rate
+        # already is -- this is the ONLY place that column is written
+        # once a pursuit is past Pre-BH (see fieldRow's conditional
+        # "derived" treatment in index.html: locked/TM5-formula-derived
+        # at Pre-BH, analyst-owned and PATCH-editable from here on).
+        # Never null out an existing value just because this particular
+        # submit left investment blank.
         cur.execute("""
             UPDATE pursuit
-               SET planned_fee_rate = %s, updated_at = now(), updated_by = %s
-             WHERE id = %s""", (fee, p.user_id, pursuit_id))
+               SET planned_fee_rate = %s,
+                   planned_investment = COALESCE(%s, planned_investment),
+                   updated_at = now(), updated_by = %s
+             WHERE id = %s""", (fee, body.investment, p.user_id, pursuit_id))
 
         row["fee"] = fee
         row["black_hat_ptw_complete"] = _recompute_complete(cur, pursuit_id, has_dep)
@@ -238,11 +247,16 @@ async def submit_ptw(
              body.margin_rate, body.bid_price))
 
         # PTW is a direct override of the fee formula -- no engine call,
-        # no fee-config lookup, unlike Black Hat.
+        # no fee-config lookup, unlike Black Hat. planned_investment kept
+        # in sync the same way as submit_black_hat -- see that block's
+        # comment for why.
         cur.execute("""
             UPDATE pursuit
-               SET planned_fee_rate = %s, updated_at = now(), updated_by = %s
-             WHERE id = %s""", (body.margin_rate, p.user_id, pursuit_id))
+               SET planned_fee_rate = %s,
+                   planned_investment = COALESCE(%s, planned_investment),
+                   updated_at = now(), updated_by = %s
+             WHERE id = %s""",
+            (body.margin_rate, body.investment, p.user_id, pursuit_id))
 
         row["margin_rate"] = body.margin_rate
         row["bid_price"] = body.bid_price
@@ -256,22 +270,95 @@ async def get_bhptw(
     pursuit_id: str,
     p: Principal = Depends(require_role("admin", "capture_manager")),
 ):
-    """Current BH/PTW state, for prefilling the form when it is reopened."""
+    """Current BH/PTW state, for prefilling the form when it is reopened.
+
+    Also returns "defaults" -- values to pre-populate a scenario's form
+    with the FIRST time it is opened (before any BLACK_HAT/PTW row
+    exists for it yet), pulled forward from the already-answered
+    questionnaire and the pursuit's own data rather than left blank for
+    the analyst to re-type. Never overrides an existing submitted
+    assessment -- the frontend only falls back to these when a
+    scenario has no row of its own, same as everywhere else in this
+    app a "derived starting point, not a locked value" is offered.
+    Source for each, confirmed against this project's own BH/PTW work
+    (bhptw.py's own docstring, ddl/11_assessment_type.sql) rather than
+    guessed:
+      margin_rate -- the SAME live fee computation Pre-BH's own
+        recalculate_pwin uses (fee.resolve_fee(), now engine-served),
+        applied to the questionnaire's own P1 answer -- not a stale
+        pursuit.planned_fee_rate, which is never written until a
+        BLACK_HAT/PTW row actually exists (see bhptw.py's submit
+        endpoints, the only writers of that column).
+      bid_price -- pursuit.planned_total_award_value (the total value).
+      base_pwin -- the QUESTIONNAIRE assessment's own base_pwin (the
+        same key val('base_pwin') already reads for "Predicted Pwin"
+        in bhptwCard -- Post-BH/PTW's Pwin is analyst-entered FROM this
+        starting point, not computed independently).
+      investment -- pursuit.planned_investment, whatever it currently
+        holds (TM5-derived at Pre-BH, analyst-entered once a BH/PTW
+        submission exists -- see submit_black_hat/submit_ptw, which
+        now keep this column in sync the same way they already do
+        planned_fee_rate).
+    """
     pursuit_id = _uuid(pursuit_id)
     with tenant_tx(p.client_id, p.user_id) as cur:
         pu = fetch_one(cur, f"""
             SELECT p.id, p.depends_on_pursuit_id, d.name AS depends_on_name,
-                   d.external_opportunity_id AS depends_on_opp_id
+                   d.external_opportunity_id AS depends_on_opp_id,
+                   p.contract_type_id, p.planned_total_award_value,
+                   p.planned_investment
               FROM pursuit p
               LEFT JOIN pursuit d ON d.id = p.depends_on_pursuit_id
              WHERE p.id = %s AND {SCOPED}""", (pursuit_id, p.user_id))
         if not pu:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "pursuit not found")
 
-        has_questionnaire = bool(fetch_one(cur, """
-            SELECT 1 FROM pwin_assessment
-             WHERE pursuit_id = %s AND assessment_type = 'QUESTIONNAIRE'
-             LIMIT 1""", (pursuit_id,)))
+        # Latest QUESTIONNAIRE assessment's own base_pwin and P1 answer --
+        # the SAME "survives a later BH/PTW submission" query recalc.py,
+        # bootstrap.py and portfolio.py all already use, so this reads
+        # identically to what Pre-BH itself last computed.
+        # p1_option_id is a scalar SUBQUERY, not a joined table -- a plain
+        # LEFT JOIN pwin_answer/question/question_option here fans this
+        # single assessment row out to one row PER ANSWERED QUESTION
+        # (TM1a..P1, 8 of them), and filtering to q.code='P1' inside the
+        # JOIN condition (rather than WHERE) does not drop the other 7 --
+        # it just leaves q NULL on them while question_option still joins
+        # on THEIR OWN option id regardless. fetch_one() then has no
+        # ordering reason to prefer the real P1 row, and silently picked
+        # a different question's option instead (confirmed live: this
+        # returned a TM1a option, not the P1 answer, and fed it to
+        # resolve_fee() as if it were one -- a wrong-but-plausible 0.065
+        # instead of the real 0.075, caught only by checking the actual
+        # number against known source data, not by any error).
+        questionnaire = fetch_one(cur, """
+            SELECT a.base_pwin,
+                   (SELECT o.id FROM pwin_answer w
+                      JOIN question q ON q.id = w.question_id AND q.code = 'P1'
+                      LEFT JOIN question_option o ON o.id = w.question_option_id
+                     WHERE w.pwin_assessment_id = a.id) AS p1_option_id
+              FROM pwin_assessment a
+             WHERE a.pursuit_id = %s AND a.scenario = 'BASE'
+               AND a.assessment_type = 'QUESTIONNAIRE'
+               AND a.id = (SELECT id FROM pwin_assessment a2
+                            WHERE a2.pursuit_id = a.pursuit_id
+                              AND a2.scenario = 'BASE'
+                              AND a2.assessment_type = 'QUESTIONNAIRE'
+                            ORDER BY a2.calculated_at DESC LIMIT 1)""",
+            (pursuit_id,))
+        has_questionnaire = questionnaire is not None
+
+        margin_default = None
+        if (questionnaire and questionnaire.get("p1_option_id")
+                and pu["contract_type_id"]):
+            try:
+                margin_default = resolve_fee(
+                    cur, pu["contract_type_id"], questionnaire["p1_option_id"])
+            except HTTPException:
+                # Best-effort prefill -- a fee-config or scoring-table
+                # problem here should not block opening the BH/PTW form
+                # at all; the analyst can still type a margin by hand,
+                # same as before this default existed.
+                margin_default = None
 
         rows = fetch_all(cur, """
             SELECT a.scenario, a.assessment_type, a.base_pwin, a.pwin,
@@ -292,5 +379,11 @@ async def get_bhptw(
         "scenarios": {
             "BASE": by_scenario.get("BASE"),
             "DEPENDENT_WON": by_scenario.get("DEPENDENT_WON"),
+        },
+        "defaults": {
+            "margin_rate": margin_default,
+            "bid_price": pu["planned_total_award_value"],
+            "base_pwin": questionnaire["base_pwin"] if questionnaire else None,
+            "investment": pu["planned_investment"],
         },
     }

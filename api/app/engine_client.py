@@ -70,6 +70,35 @@ class EngineCredentialError(RuntimeError):
     message."""
 
 
+# The engine's OWN GET /v1/markets handler (cda_engine/runtime/api.py
+# get_markets) returns this exact list on ITS OWN config-resolution
+# failure -- a 200, not an error. Confirmed directly against that
+# source (read-only reference, not assumed): it is the literal market
+# name baked into client_resolver.py's built-in default config
+# (cda_engine/tests/test_market_resolution.py's own _GENERIC_CONFIG
+# fixture uses the identical string), returned whenever resolve_key()
+# misses for an api_key that API Gateway's authorizer had ALREADY
+# accepted moments earlier -- client_resolver.py's own docstring calls
+# this "SSM drift, an ECS-side permission gap, cache staleness" on the
+# engine's side, logged there only, invisible to us. No real cpde-web
+# client is configured with one genuine market named exactly this, so
+# it is safe to treat as a resolution failure rather than real data.
+_ENGINE_MARKETS_PLACEHOLDER = ["Market 1"]
+
+
+class EngineMarketsUnresolvedError(RuntimeError):
+    """GET /v1/markets returned the engine's own default-config
+    placeholder ({"markets": ["Market 1"]}) instead of this client's
+    real markets -- see _ENGINE_MARKETS_PLACEHOLDER's comment for the
+    full mechanism, confirmed by reading the engine's own source. This
+    is an ENGINE-side resolution miss wearing an HTTP 200, not a
+    cpde-web credential problem (that is EngineCredentialError) and not
+    a genuine "this client only has one market" result -- treated as a
+    fetch failure so market_sync's existing all-or-nothing failure
+    handling rejects it outright, rather than flagging every real
+    market as gone and creating a bogus MARKET_1 row."""
+
+
 def _ssm():
     global _ssm_client
     if _ssm_client is None:
@@ -191,10 +220,14 @@ async def call_get_markets(client_row: dict) -> list[str]:
     bare display-name strings, {"markets": [...]}, with no code or id
     of any kind, and on its OWN config-resolution failure it degrades
     to a 200 with a placeholder ({"markets": ["Market 1"]}) rather than
-    an error -- a real per-client key that fails to resolve on the
-    engine side is therefore NOT distinguishable from a genuinely
-    single-market client from cpde-web's side alone. That is an engine-
-    side behavior, not something this function can compensate for."""
+    an error. Confirmed live (test_market_sync.py's own reproduction,
+    plus this codebase's own market_sync_run history) that this
+    actually happens in practice, not just a theoretical edge case --
+    raises EngineMarketsUnresolvedError rather than returning it, since
+    a real per-client key resolving to the engine's own default is a
+    resolution failure wearing a 200, not a genuine result. See
+    EngineMarketsUnresolvedError's own docstring for the full
+    mechanism."""
     url = resolve_engine_url(client_row).rstrip("/") + "/v1/markets"
     headers = _engine_headers(client_row)
     async with httpx.AsyncClient(timeout=20) as http:
@@ -203,7 +236,14 @@ async def call_get_markets(client_row: dict) -> list[str]:
             invalidate_engine_api_key_cache(client_row)
         r.raise_for_status()
         body = r.json()
-        return body.get("markets", [])
+        markets = body.get("markets", [])
+        if markets == _ENGINE_MARKETS_PLACEHOLDER:
+            raise EngineMarketsUnresolvedError(
+                "the engine returned its own default placeholder market "
+                "list ('Market 1') instead of this client's real markets "
+                "-- its own per-client key resolution likely missed; "
+                "treated as a fetch failure, not a real result")
+        return markets
 
 
 async def call_get_scoring_tables(client_row: dict) -> dict:

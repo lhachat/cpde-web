@@ -218,6 +218,84 @@ def main():
               and "simulated" in (last_run["error_message"] or ""),
               f"got {last_run}")
 
+        # ---- 6. the engine's own default-fallback placeholder is -------
+        #         treated as a fetch failure, never as real data ----------
+        # Root cause (confirmed by reading cda_engine's own source, not
+        # guessed): GET /v1/markets's handler (runtime/api.py get_markets)
+        # catches any config-resolution exception and returns a 200 with
+        # {"markets": ["Market 1"]} -- its own hardcoded default config's
+        # only market (cda_engine/tests/test_market_resolution.py's
+        # _GENERIC_CONFIG confirms the literal string). Deeper still,
+        # client_resolver.py's get_merged_config() reaches that same
+        # default WITHOUT even raising, whenever resolve_key() misses on
+        # a key that api.py's own authorizer had *already* accepted
+        # moments earlier (its own docstring: "SSM drift, an ECS-side
+        # permission gap, cache staleness") -- logged there as a
+        # RESOLVE_KEY_MISS warning, invisible from cpde-web's side. This
+        # codebase's own market_sync_run history shows it landing right
+        # after a run that failed on OUR OWN expired AWS session
+        # (ExpiredTokenException) -- consistent with the engine's
+        # resolver going cold during the gap while our calls were
+        # failing, though the exact engine-side trigger cannot be
+        # observed from here. Either way: from cpde-web's side this is
+        # indistinguishable from "the client_resolver's cache is stale"
+        # UNLESS the placeholder value itself is treated as a signal --
+        # no real cpde-web client is configured with a genuine single
+        # market named exactly "Market 1", so this is safe to reject
+        # rather than sync in as ground truth.
+        print("\n=== 6. the engine's own placeholder fallback ('Market 1') "
+              "is rejected, not synced in as real data ===")
+
+        async def fake_get_placeholder(self_http, url, headers=None, **kw):
+            class R:
+                status_code = 200
+                def raise_for_status(self): pass
+                def json(self): return {"markets": ["Market 1"]}
+            return R()
+
+        with patch.object(engine_client, "resolve_engine_api_key_for_client",
+                          return_value="SENTINEL-KEY-777"):
+            with patch("httpx.AsyncClient.get", new=fake_get_placeholder):
+                raised = None
+                try:
+                    asyncio.run(engine_client.call_get_markets(client_row))
+                except Exception as exc:
+                    raised = exc
+        check("call_get_markets raises on the engine's own placeholder "
+              "response, rather than returning it as real market data",
+              raised is not None and "Market 1" in str(raised),
+              f"got {raised!r}")
+
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as admin:
+            real_before = {r["name"]: dict(r) for r in admin.execute("""
+                SELECT name, flagged_for_review, is_active FROM market
+                 WHERE client_id = %s AND name NOT LIKE 'Test %%Market'""",
+                (aero,)).fetchall()}
+
+        with patch.object(engine_client, "resolve_engine_api_key_for_client",
+                          return_value="SENTINEL-KEY-777"):
+            with patch("httpx.AsyncClient.get", new=fake_get_placeholder):
+                placeholder_result = asyncio.run(market_sync.sync_client_markets(
+                    {"id": aero, "code": "AERO",
+                     "engine_base_url": "http://example.invalid",
+                     "engine_client_code": "cda-internal"}))
+        check("sync_client_markets reports FAILURE for a placeholder "
+              "response, not a silent 'succeeded' with every real market "
+              "flagged",
+              placeholder_result["status"] == "failed",
+              f"got {placeholder_result}")
+
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as admin:
+            real_after = {r["name"]: dict(r) for r in admin.execute("""
+                SELECT name, flagged_for_review, is_active FROM market
+                 WHERE client_id = %s AND name NOT LIKE 'Test %%Market'""",
+                (aero,)).fetchall()}
+        check("AERO's REAL markets are untouched -- none flagged, none "
+              "created as MARKET_1, because the placeholder never reached "
+              "apply_market_sync at all",
+              real_before == real_after,
+              f"before={real_before} after={real_after}")
+
     finally:
         with psycopg.connect(args.admin_dsn, row_factory=dict_row) as admin:
             admin.execute("DELETE FROM market WHERE client_id = %s AND name LIKE 'Test %%Market'",

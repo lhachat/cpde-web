@@ -695,10 +695,28 @@ function chartOrTable(key,series,labels,colors,names){
 function vDash(){
   const i=YRS.indexOf(selYear), a=yearAgg(listFor(),i), t=DTG[selYear];
   const gap=a.rev-(t.rev_target||0), bpv=(t.bp_budget||0)-a.bp, ivv=(t.inv_budget||0)-a.inv;
+  // Every Pwin-bearing dashboard figure follows the SAME established
+  // rule Revenue/Fee/B&P/Investment already use (counted(): Bid,
+  // cancelled excluded) -- a real, confirmed inconsistency until now,
+  // where Pwin figures silently used OPEN alone (any non-closed
+  // pursuit, No-Bid included). OPEN itself still excludes cancelled
+  // (it has an outcome set), so counted() here is really only adding
+  // the missing isBid() half.
+  const OPEN_COUNTED = OPEN.filter(counted);
   const cls=v=>v>=0?'up':'dn', sgn=v=>(v>=0?'+':'')+M(v);
+  // Avg Pwin is a simple arithmetic mean of each pursuit's own Pwin, NOT
+  // value-weighted -- confirmed and kept as-is (not the inconsistency
+  // found here). Pursuits/Value/Probabilistic in this same table stay
+  // sourced from whatever `list` the caller passes (OPEN, unfiltered by
+  // bid decision, unchanged) -- only the pwin average itself is
+  // restricted to counted(x) (Bid, cancelled excluded), the SAME rule
+  // Revenue/Fee/B&P/Investment already use elsewhere on this dashboard.
+  // Before this, Avg Pwin silently included open No-Bid pursuits too --
+  // a real, confirmed inconsistency, fixed here rather than left as a
+  // second, undocumented inclusion rule.
   const grp=(key,list)=>{const m={};list.forEach(x=>{const k=x[key]||'\u2014';
     (m[k]=m[k]||{n:0,value:0,prob:0,pw:[]});m[k].n++;m[k].value+=x.value;m[k].prob+=x.prob;
-    if(x.pwin!=null)m[k].pw.push(x.pwin);});
+    if(x.pwin!=null&&counted(x))m[k].pw.push(x.pwin);});
     return Object.entries(m).map(([k,v])=>({k,...v,pwin:v.pw.length?v.pw.reduce((p,q)=>p+q)/v.pw.length:null})).sort((x,y)=>y.value-x.value);};
   const oy={}; DECIDED.forEach(x=>{const y=x.outcome_year||'\u2014';(oy[y]=oy[y]||{Won:0,Lost:0,Canceled:0,wv:0,lv:0});oy[y][x.outcome]++;
     if(x.outcome==='Won')oy[y].wv+=x.value; if(x.outcome==='Lost')oy[y].lv+=x.value;});
@@ -735,8 +753,8 @@ function vDash(){
         (P.length-bid-nobid)>0 ? `<em>${P.length-bid-nobid} undecided</em>` : ''}</span></li>
       <li><a onclick="goToPursuits({sole:true})">Sole source</a><span class="r num">${P.filter(x=>x.sole).length}<em>${M(sum(P.filter(x=>x.sole),x=>x.value))}</em></span></li>
       <li><a onclick="goToPursuits({dep:true})">Dependent pursuits</a><span class="r num">${P.filter(x=>x.dep).length}<em>linked</em></span></li>
-      <li><a onclick="goToPursuits({pwin:'hi'})">Pwin at or above 50%</a><span class="r num">${OPEN.filter(x=>x.pwin>=.5).length}<em>${M(sum(OPEN.filter(x=>x.pwin>=.5),x=>x.value))}</em></span></li>
-      <li><a onclick="goToPursuits({pwin:'lo'})">Pwin below 20%</a><span class="r num">${OPEN.filter(x=>x.pwin<.2).length}<em>${M(sum(OPEN.filter(x=>x.pwin<.2),x=>x.value))}</em></span></li>
+      <li><a onclick="goToPursuits({pwin:'hi'})">Pwin at or above 50%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin>=.5).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin>=.5),x=>x.value))}</em></span></li>
+      <li><a onclick="goToPursuits({pwin:'lo'})">Pwin below 20%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin<.2).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin<.2),x=>x.value))}</em></span></li>
       <li><a onclick="show('staffing')">Peak staffing demand</a><span class="r num">${Math.max(...D.staffing.total).toFixed(0)}<em>FTE</em></span></li>
      </ul></div>`)}
   </div>
@@ -754,8 +772,8 @@ function vDash(){
       <td class="r num">${money(wv)}</td><td class="r num">${wrV==null?'\u2014':(wrV*100).toFixed(1)+'%'}</td></tr></tfoot></table></div>
     <div class="note">Cancellations are excluded from win rate \u2014 a cancelled solicitation is not a loss.
       Outcome year uses the phase-completion or cancel date where recorded, otherwise the planned award date.</div></div>`)}
-   ${SHOW('pwindist',`<div class="card"><h3>Pwin distribution <small>${OPEN.length} open pursuits</small></h3>
-    ${histogram(OPEN.filter(x=>x.pwin!=null).map(x=>x.pwin))}
+   ${SHOW('pwindist',`<div class="card"><h3>Pwin distribution <small>${OPEN_COUNTED.length} open pursuits, cancelled and no-bid excluded</small></h3>
+    ${histogram(OPEN_COUNTED.filter(x=>x.pwin!=null).map(x=>x.pwin))}
     <div class="note">Horizontal axis is Pwin %.</div></div>`)}
   </div>
   <div class="grid g2">
@@ -767,10 +785,11 @@ function vDash(){
   </div>
   <div class="grid g2">
    ${SHOW('market',`<div class="card"><h3>Revenue by market</h3>
-    ${catBody('market',grp('market',OPEN),k=>k)}</div>
+    ${catBody('market',grp('market',OPEN),k=>k)}
+    <div class="note">Pursuits/Value/Probabilistic here are every open pursuit; Avg Pwin is Bid only, cancelled excluded -- same rule as the rest of this dashboard.</div></div>
    <div class="card"><h3>Revenue by competitive analysis phase</h3>
     ${catBody('phase',grp('stage',OPEN),stagePill)}
-    <div class="note">Pwin precision improves once Black Hat and PTW are complete.</div></div>`)}
+    <div class="note">Pwin precision improves once Black Hat and PTW are complete. Avg Pwin here is Bid only, cancelled excluded.</div></div>`)}
   </div>
   ${SHOW('invtable',`<div class="card"><h3>Investment by year</h3>
     <div class="tw"><table><thead><tr><th>Year</th><th class="r">Budget</th><th class="r">Planned</th>
@@ -1120,6 +1139,10 @@ function detailView(uid){
              <span class="num">${r.opp_id??'\u2014'}</span>
              <span class="lockwhy" title="This is the key CRM import matches on. Only an administrator can change it.">admin only</span>
            </div></div>`}
+      ${fieldRow({...r, owner:r.owner_user_id},'owner','Owner/POC',
+        {type:'select',blank:true,
+         options:((D.owner_candidates||{})[r.org_unit_code]||[]).map(u=>({code:u.id,label:u.name||u.email})),
+         note:'Only people with scope over this pursuit\u2019s own business unit are listed.'})}
       ${fieldRow({...r, org_unit:r.org_unit_code},'org_unit','Business unit / division',
         {type:'select',options:(D.org_units||[]).map(u=>({code:u.code,label:u.path.join(' | ')})),
          note:'Only nodes you have scope over are listed. A division-holding BU is never an option \u2014 pick the specific division instead.'})}
@@ -1129,8 +1152,12 @@ function detailView(uid){
       ${fieldRow(r,'sole','Sole source',{type:'bool',note:'Sole source means one bidder and a Pwin of 95% \u2014 the residual is the customer not awarding at all. The assessment below does not apply.'})}
       ${fieldRow(r,'value','Award value',{type:'number',step:'100000',min:0,sym:'$'})}
       ${fieldRow(r,'fee','Planned fee',{fmt:v=>v==null?'\u2014':(v*100).toFixed(2)+'%'})}
-      ${fieldRow(r,'inv','Investment',{fmt:v=>
-         `${money(v||0)}${r.invpct?` <span style="color:var(--ink-3)">(${(r.invpct*100).toFixed(1)}% of award value)</span>`:''}`})}
+      ${r.stage && r.stage !== 'Pre-BH'
+        ? fieldRow(r,'inv','Investment',{type:'number',step:'1000',min:0,sym:'$',
+            forceEditable:true,
+            note:'Analyst-entered on the Black Hat or PTW analysis below -- editing either one updates the same value.'})
+        : fieldRow(r,'inv','Investment',{fmt:v=>
+            `${money(v||0)}${r.invpct?` <span style="color:var(--ink-3)">(${(r.invpct*100).toFixed(1)}% of award value)</span>`:''}`})}
       ${fieldRow({...r, stage:(REF?(REF.pipeline_stages.find(o=>o.label===r.stage)||{}).code:null)},'stage','Competitive analysis phase',{type:'select',options:(REF?REF.pipeline_stages:[]),note:'Moving past Pre-BH opens the Black Hat or PTW form \u2014 not yet built in this version'})}
       ${fieldRow(r,'bp_start','B&P start',{fmt:v=>v||'\u2014'})}
       ${fieldRow(r,'due','Proposal due',{type:'date'})}
@@ -1300,7 +1327,8 @@ async function recalculatePwin(uid){
       toast(msg, true);
       return;
     }
-    await loadData();
+    await loadData();               // see saveEdits' own comment on this
+    selUid = uid; detailMode = true; // exact restore, same reason
     detailView(uid);
     toast(`Recalculated: Pwin ${pwinPct(body.pwin)}.`);
   }catch(e){ toast(`Could not reach the Pwin engine: ${e.message}`, true); }
@@ -1362,9 +1390,25 @@ function bhptwCard(uid, r){
   if(!bhptwMode) bhptwMode = r.stage==='Post-PTW' ? 'PTW' : 'BLACK_HAT';
   const hasDep = BHPTW.has_dependency;
   const scenario = hasDep ? bhptwStep : 'BASE';
+  const hasSubmission = !!BHPTW.scenarios[scenario];
   const cur = BHPTW.scenarios[scenario] || {};
+  const defaults = BHPTW.defaults || {};
   const buf = bhptwBuf[scenario];
-  const val = k => Object.prototype.hasOwnProperty.call(buf,k) ? buf[k] : cur[k];
+  // Three levels: an in-progress (unsaved) edit wins first; a REAL
+  // existing submission's own stored value wins next, even if that
+  // particular field is null -- once a scenario has been submitted,
+  // its own numbers are what it means, not a recomputed guess; only
+  // when nothing has ever been submitted for this scenario do the
+  // pulled-forward defaults (margin/bid price/Pwin from the
+  // questionnaire and fee computation, investment from the pursuit)
+  // apply, so the form starts from a real starting point instead of
+  // blank. submitBhPtw's own val() below must read the SAME chain, or
+  // a default the analyst never touched would silently vanish on save.
+  const val = k => {
+    if(Object.prototype.hasOwnProperty.call(buf,k)) return buf[k];
+    if(hasSubmission) return cur[k];
+    return defaults[k] !== undefined ? defaults[k] : cur[k];
+  };
   const doneBase = !!BHPTW.scenarios.BASE;
   const doneDep = !!BHPTW.scenarios.DEPENDENT_WON;
 
@@ -1449,17 +1493,47 @@ function wireBhPtwCard(uid, r){
 }
 
 async function submitBhPtw(uid, r, scenario){
+  // Same three-level fallback bhptwCard's own val() uses (defaults only
+  // when nothing has been submitted for this scenario yet) -- otherwise
+  // a pulled-forward default the analyst never touched, but which was
+  // plainly visible in the field, would silently submit as null/undefined
+  // instead of the value actually shown on screen.
+  const hasSubmission = !!BHPTW.scenarios[scenario];
   const cur = BHPTW.scenarios[scenario] || {};
+  const defaults = BHPTW.defaults || {};
   const buf = bhptwBuf[scenario];
-  const val = k => Object.prototype.hasOwnProperty.call(buf,k) ? buf[k] : cur[k];
+  const val = k => {
+    if(Object.prototype.hasOwnProperty.call(buf,k)) return buf[k];
+    if(hasSubmission) return cur[k];
+    return defaults[k] !== undefined ? defaults[k] : cur[k];
+  };
+  // margin_rate/base_pwin are percentage-scale (0-100) ONLY when they
+  // come from buf -- bind() stores the raw <input type=number> value
+  // exactly as typed, which pctInput always displays as v0to1*100. cur
+  // (an existing submission) and defaults (pulled forward) are already
+  // 0-1 fractions, the API's own scale, same as every other rate_frac/
+  // pct_prob column in this app. Reading either through plain val() and
+  // unconditionally dividing by 100 (this function's own previous
+  // behavior) silently corrupted any submission that used a pre-filled
+  // default, or reopened an existing one, without the analyst retyping
+  // it by hand -- confirmed live: a 0.075 margin default was submitted
+  // as 0.00075. valFrac() normalizes to a fraction at the one point the
+  // scale actually differs by source, instead of assuming val()'s
+  // result is always a raw DOM percentage.
+  const valFrac = k => {
+    if(Object.prototype.hasOwnProperty.call(buf,k))
+      return buf[k]==null ? null : buf[k]/100;
+    if(hasSubmission) return cur[k];
+    return defaults[k] !== undefined ? defaults[k] : cur[k];
+  };
 
-  const basePwinPct = val('base_pwin');
-  if(basePwinPct==null){ toast('Enter a predicted Pwin.', true); return; }
+  const basePwin = valFrac('base_pwin');
+  if(basePwin==null){ toast('Enter a predicted Pwin.', true); return; }
   const body = {
     scenario,
     investment: val('investment'),
     completed_date: val('completed_date') || null,
-    base_pwin: +(basePwinPct/100).toFixed(6),
+    base_pwin: +basePwin.toFixed(6),
   };
   let path;
   if(bhptwMode==='BLACK_HAT'){
@@ -1467,10 +1541,10 @@ async function submitBhPtw(uid, r, scenario){
     body.aggressiveness_option_code = val('aggressiveness_option_code');
     path = 'blackhat';
   } else {
-    const marginPct = val('margin_rate');
-    if(marginPct==null){ toast('Enter a margin.', true); return; }
+    const marginFrac = valFrac('margin_rate');
+    if(marginFrac==null){ toast('Enter a margin.', true); return; }
     if(val('bid_price')==null){ toast('Enter a bid price.', true); return; }
-    body.margin_rate = +(marginPct/100).toFixed(6);
+    body.margin_rate = +marginFrac.toFixed(6);
     body.bid_price = val('bid_price');
     path = 'ptw';
   }
@@ -2276,7 +2350,8 @@ const UI_TO_API = {name:'name', opp_id:'external_opportunity_id',
   contract:'contract_type_code', stage:'pipeline_stage_code',
   sole:'is_sole_source', bidders:'bidders',
   value:'planned_total_award_value', due:'proposal_due_date',
-  award:'contract_award_date', end:'period_end_date'};
+  award:'contract_award_date', end:'period_end_date',
+  inv:'planned_investment'};
 
 const isAdmin = ()=> !!(D.user && (D.user.roles||[]).includes('admin'));
 // Matches PUT /api/plan-years/{year}'s require_role("admin","executive")
@@ -2312,7 +2387,13 @@ const DERIVED_WHY = {
 function fieldRow(r, key, label, opts){
   opts = opts || {};
   const val = r[key];
-  const why = DERIVED_WHY[key];
+  // Investment is TM5-derived (locked) at Pre-BH but analyst-owned once
+  // a pursuit reaches Post-BH/PTW (see bhptw.py's submit endpoints,
+  // which keep pursuit.planned_investment in sync from there on) --
+  // forceEditable lets a call site opt a normally-always-derived field
+  // out of the lock for a specific row, rather than DERIVED_WHY being a
+  // blanket, unconditional rule for every field it names.
+  const why = opts.forceEditable ? null : DERIVED_WHY[key];
   if(why){
     return `<div class="fr derived"><label>${label}</label>
       <div class="fv">${opts.fmt ? opts.fmt(val) : (val ?? '\u2014')}
@@ -2386,6 +2467,16 @@ async function saveEdits(uid){
     }
     editBuf = {}; editUid = null;
     await loadData();              // re-read so derived values refresh too
+    // loadData() unconditionally resets selUid/detailMode to null/false
+    // (correct for a real navigation or tenant switch) -- but a save
+    // stays IN this same detail view, so they must be restored before
+    // detailView() renders, or any async follow-up render gated on them
+    // (bhptwCard's own loadBhPtw callback, specifically) silently never
+    // fires once its fetch resolves: the real Black Hat/PTW data arrives
+    // but the "Loading..." placeholder never gets replaced, and nothing
+    // short of navigating away and back (or a manual refresh, which
+    // re-sets these the normal way) recovers it.
+    selUid = uid; detailMode = true;
     detailView(uid);
     // Sole source was turned off but the stored Pwin is still the 95%
     // business-rule value -- it no longer describes a competitive
@@ -2425,7 +2516,9 @@ Mark it as Bid and continue?`)){
     toast(typeof body.detail==='string'?body.detail:'Could not set outcome', true);
     return false;
   }
-  await loadData(); detailView(uid);
+  await loadData();               // see saveEdits' own comment on this
+  selUid = uid; detailMode = true; // exact restore, same reason
+  detailView(uid);
   toast(outcome ? `Recorded as ${outcome.toLowerCase()}.` : 'Pursuit reopened.');
   return true;
 }
@@ -2643,7 +2736,11 @@ async function saveBid(uid, wantBid){
   if(!pursuit) return false;
   const prev = BID[uid];
   BID[uid] = wantBid;                    // optimistic
-  render(); show(cur);
+  // render() alone already redraws the current view (vPursuits() picks
+  // list vs. detail via detailMode) -- show(cur) adds nothing when the
+  // view hasn't actually changed except its own window.scrollTo(0,0),
+  // which yanked the page back to top on every single toggle click.
+  render();
   try{
     const r = await fetch(`/api/pursuits/${pursuit.id}/bid`, {
       method:'PATCH', credentials:'same-origin',
@@ -2659,7 +2756,7 @@ async function saveBid(uid, wantBid){
     return true;
   }catch(e){
     BID[uid] = prev;                     // revert
-    render(); show(cur);
+    render();
     toast(`Could not save: ${e.message}`, true);
     return false;
   }

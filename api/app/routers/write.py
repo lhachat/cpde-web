@@ -34,7 +34,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..auth import Principal, current_principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
-from ..plan_scope import resolve_plan_year_node, resolve_pursuit_org_node
+from ..plan_scope import (resolve_plan_year_node, resolve_pursuit_org_node,
+                          resolve_pursuit_owner)
 from ..recalc import recalculate_pwin
 
 router = APIRouter(prefix="/api", tags=["write"])
@@ -65,6 +66,7 @@ PURSUIT_FIELDS = {
     "is_sole_source": "is_sole_source",
     "planned_total_award_value": "planned_total_award_value",
     "planned_fee_rate": "planned_fee_rate",
+    "planned_investment": "planned_investment",
     "proposal_due_date": "proposal_due_date",
     "contract_award_date": "contract_award_date",
     "period_end_date": "period_end_date",
@@ -81,10 +83,16 @@ PURSUIT_REFS = {
 # DERIVED -- never writable through this endpoint:
 #   bp_start_date       computed by the staffing engine, backward from
 #                       proposal_due_date across the phase durations
-#   planned_investment  = investment_pct x award value, and investment_pct
-#                       comes from the TM5 answer
 #   investment_pct      set by answering the questionnaire, not by typing
 #   pwin / scores       engine output
+#
+# planned_investment IS writable through this endpoint, but ONLY once the
+# pursuit is past Pre-BH (checked below, not just hidden in the UI) --
+# at Pre-BH it is still = investment_pct x award value, TM5-derived and
+# genuinely locked; past Pre-BH it is analyst-owned (see bhptw.py's
+# submit endpoints, which keep this column in sync the same way, and
+# index.html's fieldRow, which only renders it editable once r.stage
+# is not 'Pre-BH').
 #
 # NOT writable here, each needing its own endpoint and its own rules:
 #   outcome             closes the pursuit and freezes it; see /outcome
@@ -94,6 +102,15 @@ PURSUIT_REFS = {
 # org_node_id IS writable, but not through PURSUIT_REFS -- it needs
 # scope validation (resolve_pursuit_org_node), not a simple code lookup
 # against a reference table, so it gets its own resolution step below.
+#
+# owner_user_id (Owner/POC, backlog 3g) is the same story, one level
+# further: it needs scope validation against the PURSUIT'S OWN org
+# node's visible-user set (resolve_pursuit_owner), not the caller's own
+# scope -- see plan_scope.py's own note on why that is a fourth,
+# separate scope concept. Nullable and independently clearable (unlike
+# org_unit_code, which cannot be nulled because org_node_id is NOT
+# NULL) -- an explicit null here means "no owner assigned", a real,
+# legitimate state.
 
 
 class PursuitPatch(BaseModel):
@@ -112,12 +129,14 @@ class PursuitPatch(BaseModel):
     contract_type_code: str | None = Field(default=None, max_length=50)
     pipeline_stage_code: str | None = Field(default=None, max_length=50)
     org_unit_code: str | None = Field(default=None, max_length=50)
+    owner_user_id: str | None = Field(default=None, max_length=36)
     bid_decision: str | None = None
     # The engine's tournament solve does not support more than 6.
     bidders: int | None = Field(default=None, ge=1, le=6)
     is_sole_source: bool | None = None
     planned_total_award_value: Decimal | None = Field(default=None, ge=0)
     planned_fee_rate: Decimal | None = Field(default=None, ge=0, le=1)
+    planned_investment: Decimal | None = Field(default=None, ge=0)
     proposal_due_date: date | None = None
     contract_award_date: date | None = None
     period_end_date: date | None = None
@@ -149,6 +168,11 @@ async def patch_pursuit(
     if org_unit_code_set and org_unit_code is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "org_unit_code cannot be cleared")
+    # owner_user_id: unlike org_unit_code, an explicit null IS allowed --
+    # it means "no owner assigned", a real, legitimate state, not a
+    # caller error.
+    owner_user_id_set = "owner_user_id" in fields
+    owner_user_id = fields.pop("owner_user_id", None)
     refs = {k: v for k, v in fields.items() if k in PURSUIT_REFS}
     if ("external_opportunity_id" in fields
             and fields["external_opportunity_id"] is not None
@@ -158,22 +182,34 @@ async def patch_pursuit(
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "only an administrator can change the Opportunity ID")
     fields = {k: v for k, v in fields.items() if k in PURSUIT_FIELDS}
-    if not fields and not refs and not org_unit_code_set:
+    if not fields and not refs and not org_unit_code_set and not owner_user_id_set:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "no writable fields")
 
     with tenant_tx(p.client_id, p.user_id) as cur:
         # Re-check scope on the id. Do NOT rely on the UI having shown it.
         exists = fetch_one(cur, f"""
-            SELECT p.id, p.is_sole_source, p.bidders,
+            SELECT p.id, p.is_sole_source, p.bidders, p.org_node_id,
                    p.bp_start_date, p.proposal_due_date,
                    p.contract_award_date, p.period_end_date, p.outcome,
-                   p.updated_at, u.email AS updated_by_email
+                   p.updated_at, u.email AS updated_by_email, ps.code AS stage_code
               FROM pursuit p
               LEFT JOIN app_user u ON u.id = p.updated_by
+              LEFT JOIN pipeline_stage ps ON ps.id = p.pipeline_stage_id
              WHERE p.id = %s AND {SCOPED}""",
             (pursuit_id, p.user_id))
         if not exists:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "pursuit not found")
+
+        if ("planned_investment" in fields
+                and exists["stage_code"] == "PRE_BH"):
+            # Genuinely TM5-derived at Pre-BH (investment_pct x award
+            # value) -- server-side, not just an unrendered input, same
+            # discipline as the Opportunity ID admin-only check just
+            # below.
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Investment is derived from the questionnaire until the "
+                "pursuit reaches Post-BH or Post-PTW.")
 
         # LOST-UPDATE GUARD. Without this, two people editing the same
         # pursuit means whoever saves second silently erases the first --
@@ -247,6 +283,21 @@ async def patch_pursuit(
             fields["org_node_id"] = resolve_pursuit_org_node(cur, p.user_id, org_unit_code)
             columns["org_node_id"] = "org_node_id"
 
+        if owner_user_id_set:
+            if owner_user_id is None:
+                fields["owner_user_id"] = None
+            else:
+                # Validated against THIS PURSUIT'S OWN org node (the new
+                # one, if org_unit_code was ALSO changed in this same
+                # PATCH) -- not the caller's own scope. 404, never 403,
+                # same convention as org_unit_code just above: an
+                # out-of-scope or unknown owner is indistinguishable from
+                # "does not exist" to the caller.
+                target_node_id = fields.get("org_node_id", exists["org_node_id"])
+                fields["owner_user_id"] = resolve_pursuit_owner(
+                    cur, target_node_id, owner_user_id)
+            columns["owner_user_id"] = "owner_user_id"
+
         sets = ", ".join(f"{columns[k]} = %s" for k in fields)
         # NOTE: column names come from the whitelist, never from the payload.
         # Values are always parameters -- no interpolation of user data.
@@ -257,6 +308,7 @@ async def patch_pursuit(
          RETURNING p.id, p.external_opportunity_id, p.name, p.bid_decision,
                    p.bidders, p.is_sole_source, p.planned_total_award_value,
                    p.planned_fee_rate, p.planned_investment, p.org_node_id,
+                   p.owner_user_id,
                    p.bp_start_date, p.proposal_due_date,
                    p.contract_award_date, p.period_end_date,
                    p.updated_at""", tuple(params))
@@ -535,6 +587,7 @@ FK_LOOKUP = {
     "depends_on_pursuit_id": ("pursuit", "external_opportunity_id"),
     "updated_by": ("app_user", "display_name"),
     "created_by": ("app_user", "display_name"),
+    "owner_user_id": ("app_user", "display_name"),
 }
 
 

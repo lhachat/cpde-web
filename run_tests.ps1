@@ -45,11 +45,40 @@ try {
     Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
 }
 
+# Needs the API running on :8001 -- the real PATCH endpoint, not just the
+# schema, is what proves the Owner/POC scope check is actually enforced.
+Write-Host "`n########## PURSUIT OWNER/POC ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    python test_pursuit_owner.py --base http://localhost:8001 --admin-dsn $ADMIN
+    if ($LASTEXITCODE -ne 0) { $fail = 1 }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
 Write-Host "`n########## STAFFING ESCALATION ##########" -ForegroundColor Cyan
 try {
     Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
     python test_staffing_escalation.py --base http://localhost:8001 --admin-dsn $ADMIN
     if ($LASTEXITCODE -ne 0) { $fail = 1 }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
+# Needs BOTH the API and a live AWS session -- submitting a Black Hat
+# assessment calls the real resolve_fee() against whatever the running
+# API process has cached from the live engine, same reasoning as
+# ENGINE CLIENT below. Skipped, not failed, if either is unavailable.
+Write-Host "`n########## BH/PTW PHASE CHANGE ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    docker exec cpde-api python -c "import boto3; boto3.client('sts').get_caller_identity()" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        python test_bhptw_phase_change.py --base http://localhost:8001 --admin-dsn $ADMIN
+        if ($LASTEXITCODE -ne 0) { $fail = 1 }
+    } else {
+        Write-Host "SKIPPED - no live AWS session in the api container; run .\refresh-aws-creds.ps1 first" -ForegroundColor Yellow
+    }
 } catch {
     Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
 }

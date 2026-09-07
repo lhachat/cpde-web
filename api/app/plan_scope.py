@@ -346,3 +346,64 @@ def resolve_pursuit_org_node(cur, user_id, org_unit_code: str) -> str:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             "org unit not found in your scope")
     return str(match["id"])
+
+
+# ---------------------------------------------------------------------
+# Owner/POC picker -- A FOURTH independent scope concept, and the first
+# one that scopes USERS rather than org nodes or pursuits. "Who is a
+# valid owner for pursuit X" is answered by the pursuit's OWN org node,
+# not the caller's -- a full-scope admin editing a division's pursuit
+# should only be offered that division's own people as owner, not
+# every user in the tenant. Built entirely from fn_user_has_scope, the
+# same canonical predicate fn_user_visible_org_nodes/resolve_pursuit_org_node
+# already use -- "is this org node in that user's visible set", just
+# asked once per candidate user instead of once for the caller.
+# ---------------------------------------------------------------------
+
+def owner_candidates_by_org_node(cur, org_node_ids: list[str]) -> dict[str, list[dict]]:
+    """Every active user whose OWN visible scope covers each of the
+    given org nodes, keyed by org_node_id (as a string) -- one bulk
+    query for every org node the caller's pursuits actually span,
+    rather than one query per pursuit. Small scale (a handful of org
+    nodes, a handful of users per tenant) is why a per-pair
+    fn_user_has_scope() check in a CROSS JOIN is fine here rather than
+    a hand-rolled bulk recursive query -- see bootstrap.py's own POC-
+    scale note."""
+    if not org_node_ids:
+        return {}
+    rows = fetch_all(cur, """
+        SELECT o.org_node_id::text AS org_node_id,
+               u.id, u.email, u.display_name
+          FROM unnest(%s::uuid[]) AS o(org_node_id)
+          CROSS JOIN app_user u
+         WHERE u.is_active
+           AND fn_user_has_scope(u.id, o.org_node_id)
+         ORDER BY u.display_name""", (org_node_ids,))
+    by_node: dict[str, list[dict]] = {}
+    for r in rows:
+        by_node.setdefault(r["org_node_id"], []).append(
+            {"id": str(r["id"]), "email": r["email"], "name": r["display_name"]})
+    return by_node
+
+
+def resolve_pursuit_owner(cur, org_node_id, owner_user_id: str) -> str:
+    """The owner_user_id a pursuit's Owner/POC write applies to, or 404
+    -- never trust a caller-supplied user id without checking it against
+    THIS PURSUIT'S OWN org node's visible-user set (owner_candidates_by_org_node
+    for that one node), not the caller's own scope. Same "404, never
+    403, for something outside scope" convention as resolve_pursuit_org_node
+    and every other scope check in this codebase. A malformed id is
+    treated the same as one that does not resolve -- both are "not a
+    valid owner", not a 500."""
+    try:
+        UUID(str(owner_user_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "owner not found in this pursuit's scope")
+    candidates = owner_candidates_by_org_node(cur, [str(org_node_id)]).get(
+        str(org_node_id), [])
+    match = next((u for u in candidates if u["id"] == str(owner_user_id)), None)
+    if not match:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "owner not found in this pursuit's scope")
+    return str(owner_user_id)
