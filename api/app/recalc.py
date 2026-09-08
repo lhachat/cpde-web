@@ -41,7 +41,8 @@ _SCORED_QUESTIONS = ("TM1A", "TM1B", "TM2", "TM3", "TM4", "TM5", "PP1", "P1")
 
 async def recalculate_pwin(cur, pursuit_id: str, user_id,
                            answers_override: dict[str, str] | None = None,
-                           persist: bool = True) -> dict:
+                           persist: bool = True,
+                           scenario: str = "BASE") -> dict:
     """Runs inside an already-open tenant_tx. Raises HTTPException on any
     failure -- missing answers, missing fee config, engine unreachable,
     solver failure -- and never writes a partial or invented Pwin.
@@ -53,11 +54,22 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
     persist=False, which skips the pwin_assessment write entirely: a
     hypothetical scenario must never land in the database.
 
+    scenario: 'BASE' or 'DEPENDENT_WON' -- which stored answer set (and,
+    when persisting, which pwin_assessment row) this recalculation reads
+    from and writes to. Previously hardcoded to 'BASE' throughout --
+    Black Hat/PTW (routers/bhptw.py) has long supported both scenarios
+    independently; this was the one remaining place that didn't, which
+    meant Recalculate could never reflect a DEPENDENT_WON answer at all,
+    regardless of what the UI was showing. is_current is tracked
+    per-scenario already (pwin_assessment's own uq_pwin_current
+    constraint is on (pursuit_id, scenario)), so parameterizing this
+    doesn't change BASE's own behavior at all when scenario='BASE'.
+
     Returns the pwin_assessment row (persist=True) or a bare
     {pwin, fee, solver_message} dict (persist=False).
     """
     pu = fetch_one(cur, """
-        SELECT p.id, p.bidders, p.contract_type_id,
+        SELECT p.id, p.bidders, p.contract_type_id, p.depends_on_pursuit_id,
                ct.code AS contract_type_code,
                m.code AS market_code,
                ot.type_group, ps.code AS stage_code,
@@ -72,6 +84,13 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
          WHERE p.id = %s""", (pursuit_id,))
     if not pu:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "pursuit not found")
+    if scenario == "DEPENDENT_WON" and not pu["depends_on_pursuit_id"]:
+        # Same check bhptw.py's _load_pursuit already makes for Black
+        # Hat/PTW -- a pursuit with no dependency has no DEPENDENT_WON
+        # scenario to recalculate.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "this pursuit has no dependency; there is no "
+                            "dependent-won scenario to recalculate")
     if persist and pu["stage_code"] and pu["stage_code"] != "PRE_BH":
         # Recalculating here would flip is_current back onto a new
         # QUESTIONNAIRE row, silently regressing a Black Hat/PTW pursuit's
@@ -81,7 +100,9 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
         # phase"). Checked here, not just in the router, so write.py's
         # sole-source-toggle-off path gets the same protection. Skipped
         # entirely for a preview: it never writes anything, so there is
-        # nothing to regress.
+        # nothing to regress. Scenario-agnostic on purpose -- the pursuit's
+        # PHASE is what determines whether the questionnaire still drives
+        # its Pwin, regardless of which scenario's answers this call reads.
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "This pursuit is past Pre-BH -- its Pwin comes from the "
@@ -91,23 +112,29 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
         by_code = {code: {"label_text": lbl, "option_id": None}
                    for code, lbl in answers_override.items() if lbl}
     else:
-        # Latest QUESTIONNAIRE assessment's answers -- same "survives a
-        # later BH/PTW submission" query used by bootstrap.py/portfolio.py.
+        # Latest QUESTIONNAIRE assessment's answers for THIS scenario --
+        # same "survives a later BH/PTW submission" query used by
+        # bootstrap.py/portfolio.py, now scenario-parameterized rather
+        # than hardcoded to BASE. numeric_value/boolean_value included
+        # alongside option_id/label_text -- not every answer is an
+        # option (INVEST_PCT is numeric_value; see the INSERT loop
+        # below, which now carries all three shapes forward instead of
+        # assuming every question is option-based).
         answers = fetch_all(cur, """
             SELECT q.id AS question_id, q.code, o.id AS option_id,
-                   o.label_text
+                   o.label_text, w.numeric_value, w.boolean_value
               FROM pwin_assessment a
               JOIN pwin_answer w ON w.pwin_assessment_id = a.id
               JOIN question q ON q.id = w.question_id
               LEFT JOIN question_option o ON o.id = w.question_option_id
-             WHERE a.pursuit_id = %s AND a.scenario = 'BASE'
+             WHERE a.pursuit_id = %s AND a.scenario = %s
                AND a.assessment_type = 'QUESTIONNAIRE'
                AND a.id = (SELECT id FROM pwin_assessment a2
                             WHERE a2.pursuit_id = a.pursuit_id
-                              AND a2.scenario = 'BASE'
+                              AND a2.scenario = a.scenario
                               AND a2.assessment_type = 'QUESTIONNAIRE'
                             ORDER BY a2.calculated_at DESC LIMIT 1)""",
-            (pursuit_id,))
+            (pursuit_id, scenario))
         by_code = {r["code"]: r for r in answers}
     if not by_code:
         raise HTTPException(
@@ -213,8 +240,8 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
 
     cur.execute("""
         UPDATE pwin_assessment SET is_current = FALSE
-         WHERE pursuit_id = %s AND scenario = 'BASE' AND is_current""",
-        (pursuit_id,))
+         WHERE pursuit_id = %s AND scenario = %s AND is_current""",
+        (pursuit_id, scenario))
     qv = fetch_one(cur, """
         SELECT id FROM questionnaire_version
          WHERE code = 'pwin' AND is_active""")
@@ -225,12 +252,13 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
              pwin, base_pwin, score_tech, score_mgmt, score_past_perf,
              price_position, competitor_price_position,
              engine_request, engine_response, is_current)
-        VALUES (%s,%s,'BASE','QUESTIONNAIRE',%s,%s,
+        VALUES (%s,%s,%s,'QUESTIONNAIRE',%s,%s,
                 %s,%s,%s,%s,%s,
                 %s,%s,
                 %s,%s,TRUE)
-     RETURNING id, pwin, base_pwin, calculated_at""",
-        (pursuit_id, qv["id"] if qv else None, "engine:/v1/run", user_id,
+     RETURNING id, scenario, pwin, base_pwin, calculated_at""",
+        (pursuit_id, qv["id"] if qv else None, scenario,
+         "engine:/v1/run", user_id,
          pwin, pwin, tech, mgmt, pp,
          price_delta, cprice_delta,
          Jsonb(payload), Jsonb(result)))
@@ -243,15 +271,32 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
     # "latest QUESTIONNAIRE" query) would find it and come up empty,
     # because both intentionally stopped falling back to an older row the
     # moment a newer QUESTIONNAIRE row exists.
-    for code in _SCORED_QUESTIONS:
-        ans_row = by_code.get(code)
-        if not ans_row or not ans_row.get("question_id") or not ans_row.get("option_id"):
+    #
+    # Carries forward EVERY previously-stored answer, not just the 8
+    # scored questions (_SCORED_QUESTIONS is what SCORING reads --
+    # never was the definition of "every real answer this pursuit has").
+    # P2 (Best Value/LPTA) and INVEST_PCT are real, meaningful answers a
+    # user set that are not scored via lookup() directly, and were
+    # silently dropping off the CURRENT row on every recalculation --
+    # confirmed live, twice, on real pursuits, before this fix. Handles
+    # all three answer shapes pwin_answer supports (question_option_id /
+    # numeric_value / boolean_value), not just the option-based one
+    # every _SCORED_QUESTIONS entry happens to be.
+    for code, ans_row in by_code.items():
+        if not ans_row or not ans_row.get("question_id"):
+            continue
+        option_id = ans_row.get("option_id")
+        numeric_value = ans_row.get("numeric_value")
+        boolean_value = ans_row.get("boolean_value")
+        if option_id is None and numeric_value is None and boolean_value is None:
             continue
         cur.execute("""
             INSERT INTO pwin_answer
-                (pwin_assessment_id, question_id, question_option_id)
-            VALUES (%s,%s,%s)""",
-            (row["id"], ans_row["question_id"], ans_row["option_id"]))
+                (pwin_assessment_id, question_id, question_option_id,
+                 numeric_value, boolean_value)
+            VALUES (%s,%s,%s,%s,%s)""",
+            (row["id"], ans_row["question_id"], option_id,
+             numeric_value, boolean_value))
 
     row["fee"] = fee
     row["solver_message"] = result.get("solver_message", "")

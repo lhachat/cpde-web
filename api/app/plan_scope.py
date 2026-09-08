@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 
-from .db import fetch_all
+from .db import fetch_all, fetch_one
 
 
 def exclude_test_fixtures(nodes: list[dict]) -> list[dict]:
@@ -407,3 +407,84 @@ def resolve_pursuit_owner(cur, org_node_id, owner_user_id: str) -> str:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             "owner not found in this pursuit's scope")
     return str(owner_user_id)
+
+
+# ---------------------------------------------------------------------
+# Depends-on picker -- a pursuit's dependency is a FIFTH independent
+# scope concept, closer to Owner/POC than to org_unit_code: "which
+# pursuits can THIS CALLER offer as a dependency target" is answered by
+# the CALLER's own real scope (fn_user_pursuits), not the target
+# pursuit's org node -- a dependency can reasonably cross business
+# units (e.g. a services task order depending on the product contract
+# that creates the need for it), unlike Owner/POC, which is deliberately
+# confined to one org node's own people.
+#
+# Candidates are scoped to fn_user_pursuits(user_id) -- the CALLER's
+# true, full scope -- and NOT to whatever bootstrap.py's own `pursuits`
+# query currently returns, which can be narrower: that query is also
+# filtered to the Dashboard's own scope selector (dash_scope_ids), an
+# unrelated UI selection that can be narrowed independently of the
+# caller's real assigned scope. Reusing it here would make a pursuit
+# the caller can plainly see -- just not in the Dashboard's CURRENT
+# view -- silently unavailable as a dependency target, for a reason
+# that has nothing to do with dependency at all.
+# ---------------------------------------------------------------------
+
+def dependency_candidates(cur, user_id) -> list[dict]:
+    """Every OPEN pursuit in the caller's own real scope -- a closed
+    (Won/Lost/Canceled) pursuit's outcome is already decided, so it
+    cannot be the uncertain "if this wins" predecessor the two-scenario
+    workflow exists for."""
+    return fetch_all(cur, """
+        SELECT p.id, p.external_opportunity_id AS uid, p.name
+          FROM pursuit p
+         WHERE p.id IN (SELECT pursuit_id FROM fn_user_pursuits(%s))
+           AND p.outcome IS NULL
+         ORDER BY p.name""", (user_id,))
+
+
+def resolve_pursuit_dependency(cur, pursuit_id, user_id, depends_on_uid: str) -> str:
+    """The pursuit id a 'Depends on' write should point at, or 404/400.
+
+    404 (never 403), same convention as resolve_pursuit_org_node and
+    resolve_pursuit_owner: an out-of-scope or unknown opportunity id is
+    indistinguishable from "does not exist" to the caller. Checked
+    against the CALLER's own real scope (fn_user_pursuits), matching
+    dependency_candidates above -- not the target pursuit's own scope,
+    which is not a concept that applies here.
+
+    A self-dependency or a cycle is a 400, not a 404: the target is
+    real and in scope, the REQUEST is what's incoherent. Cycle check
+    walks the target's own depends_on_pursuit_id chain forward -- since
+    every pursuit has at most one predecessor, that chain can only
+    branch into a cycle by reaching pursuit_id again, never by any
+    other shape. Depth-capped at 50 purely as a safety net against
+    already-malformed legacy data (this endpoint can never CREATE a
+    cycle itself, since every write through it is checked here first).
+    """
+    target = fetch_one(cur, """
+        SELECT p.id FROM pursuit p
+         WHERE p.external_opportunity_id = %s
+           AND p.id IN (SELECT pursuit_id FROM fn_user_pursuits(%s))
+           AND p.outcome IS NULL""", (depends_on_uid, user_id))
+    if not target:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "dependency target not found in your scope")
+    target_id = str(target["id"])
+    if target_id == str(pursuit_id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "a pursuit cannot depend on itself")
+    cycle = fetch_one(cur, """
+        WITH RECURSIVE chain AS (
+            SELECT id, depends_on_pursuit_id, 1 AS depth
+              FROM pursuit WHERE id = %s
+            UNION ALL
+            SELECT p.id, p.depends_on_pursuit_id, chain.depth + 1
+              FROM pursuit p JOIN chain ON p.id = chain.depends_on_pursuit_id
+             WHERE chain.depth < 50
+        )
+        SELECT 1 FROM chain WHERE id = %s""", (target_id, str(pursuit_id)))
+    if cycle:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "this would create a dependency cycle")
+    return target_id

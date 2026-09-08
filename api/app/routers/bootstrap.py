@@ -22,9 +22,9 @@ from fastapi import APIRouter, Depends, Query
 from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
 from ..plan_scope import (assignable_pursuit_org_nodes, dashboard_scope_node_ids,
-                          dashboard_scope_options, exclude_test_fixtures,
-                          owner_candidates_by_org_node, resolve_dashboard_node,
-                          resolve_license_boundary_nodes)
+                          dashboard_scope_options, dependency_candidates,
+                          exclude_test_fixtures, owner_candidates_by_org_node,
+                          resolve_dashboard_node, resolve_license_boundary_nodes)
 from .staffing import (_pursuit_filter, apply_cutoff, client_escalation_rates,
                        compute_phase_dates, monthly_contributions)
 
@@ -97,6 +97,7 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
                    p.contract_award_date AS award, p.period_end_date AS "end",
                    p.cancel_date, p.black_hat_ptw_complete,
                    a.pwin, a.base_pwin, a.blended_pwin, a.assessment_type,
+                   dwa.pwin AS dependent_won_pwin,
                    d.external_opportunity_id AS dep_opp_id,
                    d.name AS dep_name,
                    p.updated_at, ub.email AS updated_by_email,
@@ -113,6 +114,15 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
               LEFT JOIN pipeline_stage ps ON ps.id = p.pipeline_stage_id
               LEFT JOIN pwin_assessment a ON a.pursuit_id = p.id
                     AND a.scenario = 'BASE' AND a.is_current
+              -- DEPENDENT_WON's own current pwin, same "one row per
+              -- pursuit" join shape as BASE's -- is_current is tracked
+              -- per (pursuit_id, scenario), so this can never double the
+              -- pursuit's row count. NULL for an independent pursuit, or
+              -- a dependent one whose DEPENDENT_WON scenario has never
+              -- been recalculated -- both real, valid states, not a
+              -- query bug.
+              LEFT JOIN pwin_assessment dwa ON dwa.pursuit_id = p.id
+                    AND dwa.scenario = 'DEPENDENT_WON' AND dwa.is_current
               LEFT JOIN pursuit d ON d.id = p.depends_on_pursuit_id
               LEFT JOIN org_node org ON org.id = p.org_node_id
              WHERE {SCOPED} AND p.is_active
@@ -134,6 +144,13 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
         owner_candidates = {node_id_to_code[nid]: cands
                             for nid, cands in candidates_by_node.items()}
 
+        # Depends-on picker candidates -- scoped to the CALLER's own real
+        # scope (fn_user_pursuits), not the Dashboard's current scope
+        # selector -- see plan_scope.py's own note on why those differ.
+        # One flat list, not per-org-node like owner_candidates: a
+        # dependency can reasonably cross business units.
+        dep_candidates = dependency_candidates(cur, p.user_id)
+
         years = fetch_all(cur, f"""
             SELECT yp.pursuit_id, yp.year_offset AS y, yp.calendar_year,
                    yp.probabilistic_revenue AS rev, yp.probabilistic_fee AS fee,
@@ -150,19 +167,25 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
         # questionnaire answers live. So this reads the latest QUESTIONNAIRE
         # row specifically, not "the current row", which may by now be a
         # BLACK_HAT or PTW row with no pwin_answer children at all.
+        #
+        # BOTH scenarios, not just BASE -- a dependent pursuit's
+        # DEPENDENT_WON questionnaire answers are real, stored data (see
+        # migrate_workbook.py's own import of them) that this query
+        # simply never fetched before, leaving the frontend with no way
+        # to show them regardless of what UI existed to ask for them.
         answers = fetch_all(cur, f"""
-            SELECT a.pursuit_id, q.code AS q, o.label_text AS answer
+            SELECT a.pursuit_id, a.scenario, q.code AS q, o.label_text AS answer
               FROM pwin_assessment a
               JOIN pursuit p ON p.id = a.pursuit_id
               JOIN pwin_answer w ON w.pwin_assessment_id = a.id
               JOIN question q ON q.id = w.question_id
               LEFT JOIN question_option o ON o.id = w.question_option_id
-             WHERE {SCOPED} AND a.scenario = 'BASE'
+             WHERE {SCOPED}
                AND a.assessment_type = 'QUESTIONNAIRE'
                AND p.org_node_id = ANY(%s::uuid[])
                AND a.id = (SELECT id FROM pwin_assessment a2
                             WHERE a2.pursuit_id = a.pursuit_id
-                              AND a2.scenario = 'BASE'
+                              AND a2.scenario = a.scenario
                               AND a2.assessment_type = 'QUESTIONNAIRE'
                             ORDER BY a2.calculated_at DESC LIMIT 1)""",
             (p.user_id, dash_scope_ids))
@@ -182,6 +205,14 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
                AND s.fte > 0 AND p.proposal_due_date IS NOT NULL
                AND p.org_node_id = ANY(%s::uuid[])""",
             (p.user_id, dash_scope_ids))
+
+        # Per-user dashboard card order (see ddl/19_dashboard_layout.sql).
+        # Absent row is a perfectly normal state -- a new user, or one who
+        # has never dragged a card -- and means "use the frontend's own
+        # default order", not an error.
+        layout_row = fetch_one(cur, """
+            SELECT card_order FROM user_dashboard_layout
+             WHERE user_id = %s""", (p.user_id,))
 
         scope_targets = fetch_all(cur, """
             SELECT y.calendar_year AS year,
@@ -203,14 +234,17 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
         by_pursuit[r["pursuit_id"]].append(r)
 
     ans_by_pursuit: dict = defaultdict(dict)
+    dep_ans_by_pursuit: dict = defaultdict(dict)
     # The views key answers by the workbook's column labels.
     Q_LABEL = {"TM1A": "TM 1a", "TM1B": "TM 1b", "TM2": "TM 2", "TM3": "TM 3",
                "TM4": "TM 4", "TM5": "TM 5", "PP1": "PP 1", "P1": "P 1",
                "P2": "P 2"}
     for r in answers:
         label = Q_LABEL.get(r["q"])
-        if label and r["answer"]:
-            ans_by_pursuit[r["pursuit_id"]][label] = r["answer"]
+        if not (label and r["answer"]):
+            continue
+        target = ans_by_pursuit if r["scenario"] == "BASE" else dep_ans_by_pursuit
+        target[r["pursuit_id"]][label] = r["answer"]
 
     plan_start = plan[0]["year"] if plan else None
     out = []
@@ -256,6 +290,13 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
                 "bp": float(y["bp"] or 0) if y else 0.0,
                 "inv": float(y["inv"] or 0) if y else 0.0})
         r["answers"] = ans_by_pursuit.get(pid, {})
+        # Only meaningful when r.dep (below) is set -- empty for every
+        # independent pursuit, and also empty for a NEWLY dependent one
+        # whose DEPENDENT_WON questionnaire has never been answered (no
+        # pwin_assessment row yet; not this round's gap to close -- the
+        # frontend shows a clear "not yet assessed" state rather than
+        # treating empty as a rendering bug).
+        r["dependent_won_answers"] = dep_ans_by_pursuit.get(pid, {})
         out.append(r)
 
     # --- monthly staffing curve, same phasing as /api/staffing/demand ---
@@ -333,4 +374,10 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
         # pursuit edit form can look candidates up directly from the
         # pursuit's own r.org_unit_code, no second request.
         "owner_candidates": owner_candidates,
+        "dashboard_layout": layout_row["card_order"] if layout_row else None,
+        # Depends-on picker options -- a flat list (uid/name), not keyed
+        # by org node like owner_candidates; see the note above the
+        # query that builds it.
+        "dependency_candidates": [{"uid": c["uid"], "name": c["name"]}
+                                  for c in dep_candidates],
     }

@@ -9,6 +9,172 @@ it does.
 
 ---
 
+## [0.6.0] — 2026-09-08
+
+A run of pursuit-detail work: dependency handling went from a display
+bug hiding a never-built feature to a real, validated write path with
+its own scenario-aware questionnaire and recalculation; the dashboard
+gained real drag-to-reorder; and two long-standing detail-view
+navigation/interaction bugs were found and fixed. Every item below was
+verified live -- real database writes, real Playwright-driven UI
+interaction, real before/after Pwin values against the live engine --
+and every temporary test mutation was restored via the real write path,
+confirmed via audit log or direct query.
+
+### Depends-on: from a raw-HTML display bug to a real feature
+
+- The pursuit detail page's "Depends on" field previously showed
+  literal `<b>Sentinel Upgrade</b> (ID 1054)` as plain text --
+  unescaped markup stuffed into an `<input value="...">` attribute,
+  which browsers never parse as HTML. Investigated before assuming a
+  fix: confirmed via `write.py`'s own code comment that
+  `depends_on_pursuit_id` had **never had a write path at all** --
+  only `migrate_workbook.py`'s one-time import ever set it. This was
+  "build a picker from scratch," not "fix a broken dropdown."
+- Built: a real `<select>`, scope-limited to the caller's own visible
+  OPEN pursuits (`fn_user_pursuits`, independent of the Dashboard's own
+  narrower scope selector -- a real, confirmed inconsistency risk if
+  reused instead), rejecting a self-dependency and any dependency cycle
+  server-side (`resolve_pursuit_dependency`, confirmed live against a
+  real 2-cycle), fully audited via the existing generic trigger.
+- Found and fixed the same class of bug in the field this was modeled
+  on: the existing Owner/POC picker rendered real candidates and looked
+  fully functional, but `UI_TO_API` had no entry for `owner` --
+  selecting a candidate never reached the save buffer. One-line fix,
+  confirmed live (Save bar now appears; the write persists).
+
+### Dependent-pursuit questionnaire: a real scenario indicator, and the answers behind it
+
+- No indicator previously existed for which scenario (`BASE` /
+  `DEPENDENT_WON`) a dependent pursuit's questionnaire answers belonged
+  to -- confirmed the deeper cause was that `bootstrap.py` only ever
+  fetched `BASE`-scenario answers; `DEPENDENT_WON` answers were real,
+  stored data the API simply never sent to the frontend. Now fetches
+  and displays both; a visible scenario badge (reusing the existing
+  pill/badge visual language) shows which one is on screen, with
+  working Base/Dependent-won toggle buttons that were previously inert
+  decoration.
+- **The answer save path itself did not exist.** Changing a
+  TM1a-P1 dropdown on the pursuit detail page updated only the DOM;
+  nothing persisted, and Recalculate silently scored whatever was still
+  stored, ignoring anything just changed on screen. Built
+  `PATCH /api/pursuits/{id}/answers`: scope-checked, audited, validated
+  against the LIVE engine spec for both the raw option list and the
+  cascade-narrowed one for the combination the save would actually
+  produce -- closing a real, confirmed gap where an illegal TM2/TM3 (or
+  services-only TM1a/TM1b/TM2) combination was previously rejected only
+  by the dropdown's own client-side filtering, never on write. Wired
+  into the same `editBuf`/save-bar/dirty-highlight pattern every other
+  pursuit field already uses, not a new interaction.
+- `POST /api/pursuits/{id}/recalculate` was hardcoded to scenario
+  `BASE` throughout (fetch, `is_current` toggle, and the insert itself)
+  -- Black Hat/PTW has supported both scenarios independently for a
+  while; this was the one place that hadn't caught up, meaning
+  Recalculate could never reflect a `DEPENDENT_WON` answer at all. Now
+  scenario-parameterized; verified live end to end on a real dependent
+  pursuit in both scenarios independently (Pwin moved with a real
+  answer change in each, confirmed unaffected by anything done in the
+  other).
+- Found the same recalculation carrying forward only the 8 *scored*
+  questions into each new assessment row, silently dropping `P2`
+  (Best Value/LPTA) and `INVEST_PCT` -- both real, meaningful answers,
+  neither scored via `scoring.lookup()` directly -- on every single
+  Recalculate. Confirmed live, twice, on real pursuits, before fixing:
+  the new row now carries the FULL prior answer set forward (all three
+  `pwin_answer` shapes -- option, numeric, boolean -- not just the
+  option-based scored ones), then applies whatever changed. Re-verified
+  the cascade-validation fix above still holds with a carried-forward
+  full answer set, and that a real scored-answer change still moves the
+  Pwin exactly as before (no regression).
+
+### Dashboard: real drag-to-reorder, and a layout bug it exposed
+
+- Cards on the Dashboard can now be dragged to reorder, persisted
+  per-user (`ddl/19_dashboard_layout.sql`, a new small table -- no
+  general preferences mechanism existed to extend instead) -- a new
+  user, or a stored layout missing a newly-added card, falls back to
+  the current default order.
+- Fixed a real layout bug the new drag handle exposed: on cards with a
+  right-justified header subtitle, the handle overlapped and clipped
+  the last 1-2 characters. Reserved the handle's own space in the
+  header's existing flex layout rather than floating it on top, applied
+  to every draggable card, not just the ones the screenshot showed.
+
+### Two detail-view navigation/interaction bugs
+
+- B&P and Investment's own pursuit tables listed rows but were not
+  clickable at all -- wired into the SAME row-click-to-detail function
+  the Pursuits list already used, not a second mechanism.
+- Making those tables open detail exposed a real bug that predated
+  them: exiting a pursuit's detail view always returned to the
+  Pursuits list, even when opened from B&P or Investment. The exit
+  path was hardcoded; now captures the real origin view at the moment
+  detail opens and returns to it. Confirmed the one path that already
+  worked (Pursuits list itself) still does.
+- Fixed a real, separate rapid-toggle bug found while investigating a
+  report that looked like a duplicate of an earlier scroll fix: the
+  Pursuits list's own toggle re-render used a boolean scroll-guard flag
+  that lost track of itself under rapid sequential toggles, letting a
+  transient mid-render scroll position get latched in as "known good."
+  Confirmed the earlier, differently-caused scroll fix was unrelated,
+  not a regression of it.
+
+### Test suite growth
+
+| Suite | Assertions | Result |
+|---|---|---|
+| `test_isolation.py` — tenant isolation (RLS) | 29 | pass |
+| `test_scope.py` — business-unit scope | 14 | pass |
+| `test_integrity.py` — data integrity | 44 | pass (1 warning, non-fatal, unchanged since v0.2.0) |
+| `test_api_security.py` — API-layer security | 122 | pass |
+| `test_staffing_escalation.py` — staffing escalation model | 14 | pass |
+| `test_market_sync.py` — market sync job | 19 | pass |
+| `test_recalc_response_handling.py` — engine response-shape discipline | 3 | pass |
+| `test_scoring_migration.py` — live scoring-table migration | 10 | pass |
+| `test_fee_competitor_migration.py` — fee/competitor migration | 8 | pass |
+| `test_questionnaire_migration.py` — live questionnaire migration | 10 | pass |
+| `test_pursuit_owner.py` — Owner/POC field | 14 | pass |
+| `test_pursuit_dependency.py` — Depends-on field (new) | 18 | pass |
+| `test_questionnaire_answers.py` — answer save path + recalculation (new) | 37 | pass |
+| `test_bhptw_phase_change.py` — Black Hat/PTW phase change | 11 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_engine_client.py` — real AWS/SSM + live engine verification | 10 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_tm1a_tm1b_tm2_cascade.py` — cascade fix re-verification | 4 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+
+**367 assertions passing across sixteen suites** (up from 264 across
+ten at v0.5.0).
+
+### Known gaps
+
+- `pwin_assessment.blended_pwin` (the dependency-blend math combining a
+  `BASE` and `DEPENDENT_WON` assessment into one true "effective Pwin")
+  is still not computed anywhere -- unchanged since v0.3.0. The
+  scenario badge built this round shows each scenario's own Pwin
+  separately; it does not blend them, on purpose, since that math still
+  does not exist.
+- DASH_CFG's show/hide and chart-type-per-card settings are still
+  client-side only, reset every session -- only card ORDER was given
+  real per-user persistence this round. The config panel's own copy
+  ("saved to their profile") still overstates what's actually built for
+  the other two.
+- Observed, not fully chased down: LPTA (`P2`) is documented and
+  rendered as disabling TM1a/TM1b/TM2/TM3/TM4/PP1 from SCORING
+  (`renderQ`'s own `LPTA_OFF` gate), but `recalculate_pwin()` still
+  unconditionally scores all 8 `_SCORED_QUESTIONS` regardless of `P2` --
+  worth a real look at whether LPTA pursuits' stored Pwin is actually
+  computed the way the UI claims.
+- market_sync noise (repeatedly flags AERO's real markets, injects a
+  placeholder against production) -- unchanged since v0.5.0, still not
+  investigated.
+- No real `cpde-web` production ECS deployment yet -- unchanged since
+  v0.4.0.
+- Two AERO pursuits reassigned from BMC2A to MSN in the database only;
+  their stored Pwins were computed against BMC2A's differential --
+  unchanged since v0.3.0.
+- `06_plan_year.sql` superseded by `migrate_workbook.py`; delete it --
+  unchanged since v0.3.0.
+- Tests are still not automated on commit.
+- No licensing enforcement.
+
 ## [0.5.0] — 2026-09-03
 
 Significant scope since v0.4.0 -- the first cross-product consistency

@@ -68,11 +68,41 @@ try {
     Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
 }
 
+# Needs the API running on :8001 -- the real PATCH endpoint is what
+# proves the depends-on picker's scope/self/cycle checks are actually
+# enforced, not just representable in the schema.
+Write-Host "`n########## PURSUIT DEPENDS-ON ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    python test_pursuit_dependency.py --base http://localhost:8001 --admin-dsn $ADMIN
+    if ($LASTEXITCODE -ne 0) { $fail = 1 }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
 Write-Host "`n########## STAFFING ESCALATION ##########" -ForegroundColor Cyan
 try {
     Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
     python test_staffing_escalation.py --base http://localhost:8001 --admin-dsn $ADMIN
     if ($LASTEXITCODE -ne 0) { $fail = 1 }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
+# Needs BOTH the API and a live AWS session -- scoring.get_questionnaire()
+# needs the real engine spec loaded to validate an answer/cascade, same
+# reasoning as ENGINE CLIENT/TM1A+TM1B->TM2 below. Skipped, not failed,
+# if either is unavailable.
+Write-Host "`n########## QUESTIONNAIRE ANSWER SAVE PATH ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    docker exec cpde-api python -c "import boto3; boto3.client('sts').get_caller_identity()" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        python test_questionnaire_answers.py --base http://localhost:8001 --admin-dsn $ADMIN
+        if ($LASTEXITCODE -ne 0) { $fail = 1 }
+    } else {
+        Write-Host "SKIPPED - no live AWS session in the api container; run .\refresh-aws-creds.ps1 first" -ForegroundColor Yellow
+    }
 } catch {
     Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
 }

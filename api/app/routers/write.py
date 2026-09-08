@@ -30,13 +30,15 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from psycopg.types.json import Json
 from pydantic import BaseModel, Field, field_validator
 
 from ..auth import Principal, current_principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
-from ..plan_scope import (resolve_plan_year_node, resolve_pursuit_org_node,
-                          resolve_pursuit_owner)
+from ..plan_scope import (resolve_plan_year_node, resolve_pursuit_dependency,
+                          resolve_pursuit_org_node, resolve_pursuit_owner)
 from ..recalc import recalculate_pwin
+from ..scoring import ScoringTableError, get_questionnaire
 
 router = APIRouter(prefix="/api", tags=["write"])
 
@@ -97,7 +99,6 @@ PURSUIT_REFS = {
 # NOT writable here, each needing its own endpoint and its own rules:
 #   outcome             closes the pursuit and freezes it; see /outcome
 #   client_id           tenancy is never caller-supplied
-#   depends_on_pursuit_id  changes the two-assessment requirement
 #
 # org_node_id IS writable, but not through PURSUIT_REFS -- it needs
 # scope validation (resolve_pursuit_org_node), not a simple code lookup
@@ -111,6 +112,17 @@ PURSUIT_REFS = {
 # org_unit_code, which cannot be nulled because org_node_id is NOT
 # NULL) -- an explicit null here means "no owner assigned", a real,
 # legitimate state.
+#
+# depends_on_pursuit_id (via depends_on_opp_id) used to be flatly "not
+# writable here" -- no edit path had ever been built, only
+# migrate_workbook.py's own import-time write direct to the column.
+# Now the fifth scope concept plan_scope.py documents: validated
+# against the CALLER's own real scope (fn_user_pursuits), not the
+# target's org node -- a dependency can reasonably cross business
+# units. Self-dependency and cycles are rejected (resolve_pursuit_
+# dependency). Nullable and independently clearable, same reasoning as
+# owner_user_id: an explicit null means "no longer dependent", a real,
+# legitimate state -- not merely "field not mentioned in this PATCH".
 
 
 class PursuitPatch(BaseModel):
@@ -130,6 +142,7 @@ class PursuitPatch(BaseModel):
     pipeline_stage_code: str | None = Field(default=None, max_length=50)
     org_unit_code: str | None = Field(default=None, max_length=50)
     owner_user_id: str | None = Field(default=None, max_length=36)
+    depends_on_opp_id: str | None = Field(default=None, max_length=100)
     bid_decision: str | None = None
     # The engine's tournament solve does not support more than 6.
     bidders: int | None = Field(default=None, ge=1, le=6)
@@ -173,6 +186,13 @@ async def patch_pursuit(
     # caller error.
     owner_user_id_set = "owner_user_id" in fields
     owner_user_id = fields.pop("owner_user_id", None)
+    # depends_on_opp_id: same nullable-and-clearable story as owner_user_id.
+    # An opportunity id (matching how the UI and everywhere else in this
+    # app already addresses one pursuit from another -- oppRef/depMark),
+    # not the raw pursuit uuid -- resolved to one via resolve_pursuit_
+    # dependency, which also rejects a self-dependency or a cycle.
+    depends_on_set = "depends_on_opp_id" in fields
+    depends_on_opp_id = fields.pop("depends_on_opp_id", None)
     refs = {k: v for k, v in fields.items() if k in PURSUIT_REFS}
     if ("external_opportunity_id" in fields
             and fields["external_opportunity_id"] is not None
@@ -182,7 +202,8 @@ async def patch_pursuit(
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "only an administrator can change the Opportunity ID")
     fields = {k: v for k, v in fields.items() if k in PURSUIT_FIELDS}
-    if not fields and not refs and not org_unit_code_set and not owner_user_id_set:
+    if (not fields and not refs and not org_unit_code_set
+            and not owner_user_id_set and not depends_on_set):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "no writable fields")
 
     with tenant_tx(p.client_id, p.user_id) as cur:
@@ -298,6 +319,19 @@ async def patch_pursuit(
                     cur, target_node_id, owner_user_id)
             columns["owner_user_id"] = "owner_user_id"
 
+        if depends_on_set:
+            if depends_on_opp_id is None:
+                fields["depends_on_pursuit_id"] = None
+            else:
+                # Validated against the CALLER's own real scope (see
+                # plan_scope.py's own note on why this differs from
+                # owner_user_id/org_unit_code), and rejects a self-
+                # dependency or a cycle. 404, never 403, same convention
+                # as everywhere else an id/code outside scope is rejected.
+                fields["depends_on_pursuit_id"] = resolve_pursuit_dependency(
+                    cur, pursuit_id, p.user_id, depends_on_opp_id)
+            columns["depends_on_pursuit_id"] = "depends_on_pursuit_id"
+
         sets = ", ".join(f"{columns[k]} = %s" for k in fields)
         # NOTE: column names come from the whitelist, never from the payload.
         # Values are always parameters -- no interpolation of user data.
@@ -308,7 +342,7 @@ async def patch_pursuit(
          RETURNING p.id, p.external_opportunity_id, p.name, p.bid_decision,
                    p.bidders, p.is_sole_source, p.planned_total_award_value,
                    p.planned_fee_rate, p.planned_investment, p.org_node_id,
-                   p.owner_user_id,
+                   p.owner_user_id, p.depends_on_pursuit_id,
                    p.bp_start_date, p.proposal_due_date,
                    p.contract_award_date, p.period_end_date,
                    p.updated_at""", tuple(params))
@@ -731,3 +765,309 @@ async def audit(
              WHERE {clause}
              ORDER BY a.occurred_at DESC
              LIMIT %s""", tuple(params) + (min(limit, 500),))
+
+
+class DashboardLayoutIn(BaseModel):
+    card_order: list[str] = Field(..., min_length=1, max_length=40)
+
+    @field_validator("card_order")
+    @classmethod
+    def _sane(cls, v):
+        if len(set(v)) != len(v):
+            raise ValueError("card_order cannot contain duplicates")
+        if any(not isinstance(x, str) or not (1 <= len(x) <= 40) for x in v):
+            raise ValueError("card_order entries must be short strings")
+        return v
+
+
+@router.put("/dashboard-layout")
+async def set_dashboard_layout(
+    body: DashboardLayoutIn,
+    p: Principal = Depends(current_principal),
+):
+    """Per-user dashboard card order (ddl/19_dashboard_layout.sql). Any
+    authenticated user may set their own -- this is personal UI state,
+    the same category as which cards DASH_CFG shows or hides
+    client-side, not a privileged action requiring a role check.
+
+    Card identifiers are opaque strings from the frontend's own
+    DASH_CFG keys. Deliberately not validated against a fixed set here:
+    a card added to DASH_CFG later needs no matching migration, and a
+    stale key from a since-removed card is harmless -- the frontend
+    already filters CARD_ORDER down to keys it currently knows about.
+    """
+    with tenant_tx(p.client_id, p.user_id) as cur:
+        cur.execute("""
+            INSERT INTO user_dashboard_layout (user_id, card_order)
+            VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE
+               SET card_order = EXCLUDED.card_order, updated_at = now()""",
+            (p.user_id, Json(body.card_order)))
+    return {"card_order": body.card_order}
+
+
+# ---------------------------------------------------------------------
+# Questionnaire answers -- previously had NO write path at all. Changing
+# a TM1a-P1 dropdown on the pursuit detail page updated only the DOM;
+# nothing reached editBuf (index.html's UI_TO_API has no entry for a
+# question code, by design -- these were never real pursuit fields) and
+# there was no endpoint to send them to even if it had. Recalculate then
+# scored whatever was still in pwin_answer, silently ignoring the
+# on-screen change. This is that write path.
+#
+# question code ('TM1A', ..., 'P2') -> DB code is already exact; the
+# ENGINE spec keys its questions by a different, lowercase id ('tm1a')
+# -- QUESTION_CODE_TO_SPEC_ID bridges the two, the server-side mirror of
+# index.html's QID_TO_KEY/SCORED_UI_KEYS (which bridge DB code to the
+# UI's spaced display key instead). Three names for the same nine
+# questions across engine spec / DB / UI was already true before this
+# endpoint; it does not add a fourth, just the one this side needed.
+QUESTION_CODE_TO_SPEC_ID = {
+    "TM1A": "tm1a", "TM1B": "tm1b", "TM2": "tm2", "TM3": "tm3", "TM4": "tm4",
+    "TM5": "tm5", "PP1": "pp1", "P1": "p1", "P2": "p2",
+}
+
+
+class QuestionnaireAnswersIn(BaseModel):
+    scenario: str = "BASE"
+    # question code -> answer label text (e.g. {"TM1A": "On contract
+    # today"}), or null to clear a previously-set answer. Only changed
+    # questions need to be sent -- same partial-update shape as every
+    # other PATCH in this file.
+    answers: dict[str, str | None] = Field(..., min_length=1)
+
+    @field_validator("scenario")
+    @classmethod
+    def _scenario(cls, v):
+        if v not in ("BASE", "DEPENDENT_WON"):
+            raise ValueError("scenario must be BASE or DEPENDENT_WON")
+        return v
+
+    @field_validator("answers")
+    @classmethod
+    def _known_codes(cls, v):
+        unknown = set(v) - set(QUESTION_CODE_TO_SPEC_ID)
+        if unknown:
+            raise ValueError(f"unknown question code(s): {sorted(unknown)}")
+        return v
+
+
+def _spec_options(spec: dict, spec_id: str, is_product: bool) -> list[str] | None:
+    """This question's base option list from the live engine spec,
+    branched by pursuit type where the question has separate
+    product/services option sets (tm1a, tm1b) -- None if the spec has
+    no such question at all (should not happen for one of our nine
+    known codes, but a live-fetched spec is still an external input)."""
+    item = next((q for q in spec.get("questions", []) if q["id"] == spec_id), None)
+    if item is None:
+        return None
+    opts = item.get("options")
+    if isinstance(opts, list):
+        return list(opts)
+    if isinstance(opts, dict):
+        return list(opts.get("product" if is_product else "services") or [])
+    return []
+
+
+def _cascaded_options(spec: dict, spec_id: str, is_product: bool,
+                      merged: dict[str, str | None]) -> list[str] | None:
+    """The SAME base list, narrowed by whichever of the engine's own
+    live cascade rules apply to this question -- generic over the
+    spec's own {when, remove_option/force_options} / {map} shapes
+    rather than a hardcoded parallel copy of index.html's optionsFor(),
+    so a change to the engine's cascade wording cannot silently drift
+    the two out of sync. `merged` is the full answer set (existing
+    stored answers with this request's changes already applied) keyed
+    by DB code (TM1A, ...) -- cascade legality depends on the
+    COMBINATION that would result from this save, not just the one
+    field being changed."""
+    base = _spec_options(spec, spec_id, is_product)
+    if base is None:
+        return None
+    casc = spec.get("cascades", {})
+    is_services = not is_product
+
+    if is_services and spec_id == "tm1b":
+        rule = (casc.get("tm1a_to_tm1b") or {}).get("rule") or {}
+        when = rule.get("when") or {}
+        remove = rule.get("remove_option") or {}
+        if (when.get("question") == "tm1a"
+                and merged.get("TM1A") == when.get("answer")
+                and remove.get("option") in base):
+            base = [o for o in base if o != remove["option"]]
+
+    if is_services and spec_id == "tm2":
+        rule = (casc.get("tm1a_tm1b_to_tm2") or {}).get("rule") or {}
+        conds = (rule.get("when") or {}).get("all") or []
+        force = (rule.get("force_options") or {}).get("options")
+        def _no_or_unanswered(code):
+            v = merged.get(code.upper())
+            return not v or v == "No"
+        if conds and force and all(
+                _no_or_unanswered(c["question"]) for c in conds
+                if c.get("is_no_or_unanswered")):
+            base = list(force)
+
+    if spec_id == "tm3":
+        # applies_to: "all" in the live spec -- not services-gated.
+        m = (casc.get("tm2_to_tm3") or {}).get("map") or {}
+        base = list(m.get(merged.get("TM2"), ["N/A"]))
+
+    return base
+
+
+@router.patch("/pursuits/{pursuit_id}/answers")
+async def set_questionnaire_answers(
+    pursuit_id: str,
+    body: QuestionnaireAnswersIn,
+    p: Principal = Depends(require_role("admin", "capture_manager")),
+):
+    """Save questionnaire answers for one pursuit/scenario. Persists
+    immediately (no separate 'submit' step) -- Recalculate Pwin remains
+    the explicit, separate action it already was; this only makes sure
+    it has something current to read.
+
+    Validated against the LIVE engine spec (scoring.get_questionnaire()),
+    both the raw option list (branched by pursuit type where the
+    question has one) and the cascade-narrowed list for the combination
+    this save would actually produce -- a value legal in isolation but
+    illegal alongside this pursuit's OTHER stored answers (e.g. a TM3
+    that doesn't belong to the current TM2) is rejected the same as an
+    unknown one, not silently accepted. This was previously enforced
+    ONLY by the questionnaire dropdown's own client-side filtering
+    (index.html's optionsFor()) -- a direct API call had no such check
+    at all.
+    """
+    pursuit_id = _uuid(pursuit_id)
+    with tenant_tx(p.client_id, p.user_id) as cur:
+        pu = fetch_one(cur, f"""
+            SELECT p.id, p.outcome, p.depends_on_pursuit_id, ot.type_group
+              FROM pursuit p
+              LEFT JOIN opportunity_type ot ON ot.id = p.opportunity_type_id
+             WHERE p.id = %s AND {SCOPED}""", (pursuit_id, p.user_id))
+        if not pu:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "pursuit not found")
+        if pu["outcome"] is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "pursuit is closed and cannot be edited")
+        if body.scenario == "DEPENDENT_WON" and not pu["depends_on_pursuit_id"]:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "this pursuit has no dependency; there is no "
+                                "dependent-won scenario to record")
+
+        try:
+            spec = get_questionnaire()
+        except ScoringTableError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
+        is_product = pu["type_group"] == "PRODUCT"
+
+        # The pursuit's CURRENT full answer set for this scenario (latest
+        # QUESTIONNAIRE-type row, same "survives a later BH/PTW
+        # submission" lookup recalc.py/bootstrap.py use), merged with
+        # this request's changes -- cascade legality is checked against
+        # the combination that would actually result, not the changed
+        # fields in isolation.
+        assessment = fetch_one(cur, """
+            SELECT id FROM pwin_assessment
+             WHERE pursuit_id = %s AND scenario = %s
+               AND assessment_type = 'QUESTIONNAIRE'
+             ORDER BY calculated_at DESC LIMIT 1""",
+            (pursuit_id, body.scenario))
+        current = {}
+        if assessment:
+            rows = fetch_all(cur, """
+                SELECT q.code, o.label_text FROM pwin_answer w
+                  JOIN question q ON q.id = w.question_id
+                  LEFT JOIN question_option o ON o.id = w.question_option_id
+                 WHERE w.pwin_assessment_id = %s""", (assessment["id"],))
+            current = {r["code"]: r["label_text"] for r in rows}
+        merged = {**current, **body.answers}
+
+        for code, spec_id in QUESTION_CODE_TO_SPEC_ID.items():
+            if code not in merged or merged[code] is None:
+                continue
+            options = _cascaded_options(spec, spec_id, is_product, merged)
+            if options is None:
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                                    f"the engine spec has no question {spec_id!r}")
+            if merged[code] not in options:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"{merged[code]!r} is not a valid answer for {code} "
+                    f"given this pursuit's other answers (valid: {options})")
+
+        # Resolve every CHANGED answer's label to its question_option_id
+        # before writing anything -- an unresolvable label (should be
+        # impossible after the cascade check above, since it validated
+        # against the same live spec, but the spec and question_option
+        # are two different sources of truth) fails the whole request,
+        # never a partial write.
+        to_write: list[tuple] = []   # (question_id, option_id_or_None)
+        for code, label in body.answers.items():
+            if label is None:
+                q = fetch_one(cur, "SELECT id FROM question WHERE code = %s",
+                              (code,))
+                if not q:
+                    raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                        f"unknown question code: {code}")
+                to_write.append((q["id"], None))
+                continue
+            opt = fetch_one(cur, """
+                SELECT o.id, o.question_id FROM question_option o
+                  JOIN question q ON q.id = o.question_id
+                 WHERE q.code = %s AND o.label_text = %s AND o.is_active""",
+                (code, label))
+            if not opt:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"{label!r} is not a recognized answer for {code}")
+            to_write.append((opt["question_id"], opt["id"]))
+
+        if not assessment:
+            # No QUESTIONNAIRE assessment exists yet for this scenario at
+            # all (the common case: a dependency was just set on a
+            # pursuit that never had a DEPENDENT_WON row -- see this
+            # round's own investigation). Only make it is_current if
+            # nothing else already holds that flag for this scenario --
+            # a Post-BH/PTW pursuit's DEPENDENT_WON assessment, if this
+            # is somehow its very first row, has nothing to conflict
+            # with; the ordinary case (Pre-BH, no assessment at all yet
+            # for this scenario) is exactly the same story.
+            already_current = fetch_one(cur, """
+                SELECT 1 FROM pwin_assessment
+                 WHERE pursuit_id = %s AND scenario = %s AND is_current""",
+                (pursuit_id, body.scenario))
+            qv = fetch_one(cur, """
+                SELECT id FROM questionnaire_version
+                 WHERE code = 'pwin' AND is_active""")
+            assessment = fetch_one(cur, """
+                INSERT INTO pwin_assessment
+                    (pursuit_id, questionnaire_version_id, scenario,
+                     assessment_type, engine_version, calculated_by,
+                     is_current)
+                VALUES (%s,%s,%s,'QUESTIONNAIRE','manual:answer-save',%s,%s)
+             RETURNING id""",
+                (pursuit_id, qv["id"] if qv else None, body.scenario,
+                 p.user_id, already_current is None))
+
+        for question_id, option_id in to_write:
+            if option_id is None:
+                # Clearing an answer: pwin_answer's own ck_pwin_answer_
+                # one_value check requires EXACTLY one of question_
+                # option_id/numeric_value/boolean_value to be set, so a
+                # "cleared" answer has no valid row shape at all -- it is
+                # the ABSENCE of a row, same as a question never answered.
+                cur.execute("""
+                    DELETE FROM pwin_answer
+                     WHERE pwin_assessment_id = %s AND question_id = %s""",
+                    (assessment["id"], question_id))
+            else:
+                cur.execute("""
+                    INSERT INTO pwin_answer
+                        (pwin_assessment_id, question_id, question_option_id)
+                    VALUES (%s,%s,%s)
+                    ON CONFLICT (pwin_assessment_id, question_id)
+                    DO UPDATE SET question_option_id = EXCLUDED.question_option_id""",
+                    (assessment["id"], question_id, option_id))
+
+    return {"scenario": body.scenario, "answers": body.answers}

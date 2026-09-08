@@ -31,9 +31,26 @@ def _uuid(value: str) -> str:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
 
 
+class RecalculateIn(BaseModel):
+    # Optional: an empty body (no Content-Type / no JSON at all) must
+    # keep working exactly as before -- this endpoint had no body until
+    # now, and every existing caller (the UI's own dCalc button, up to
+    # this round) sends none. FastAPI already treats a missing/absent
+    # body as "use the model's defaults" for an all-optional model.
+    scenario: str = "BASE"
+
+    @field_validator("scenario")
+    @classmethod
+    def _scenario(cls, v):
+        if v not in ("BASE", "DEPENDENT_WON"):
+            raise ValueError("scenario must be BASE or DEPENDENT_WON")
+        return v
+
+
 @router.post("/pursuits/{pursuit_id}/recalculate")
 async def recalculate(
     pursuit_id: str,
+    body: RecalculateIn = RecalculateIn(),
     p: Principal = Depends(require_role("admin", "capture_manager")),
 ):
     pursuit_id = _uuid(pursuit_id)
@@ -52,10 +69,13 @@ async def recalculate(
                 status.HTTP_400_BAD_REQUEST,
                 "sole source pursuits use the 95% business rule, not the "
                 "engine -- see the Sole source field on this pursuit")
-        # The Pre-BH stage guard lives in recalculate_pwin() itself (not
-        # here) so write.py's sole-source-toggle-off path gets it too.
+        # The Pre-BH stage guard AND the "no dependency, no DEPENDENT_WON
+        # scenario" guard both live in recalculate_pwin() itself (not
+        # here) so write.py's sole-source-toggle-off path gets the former
+        # too.
 
-        row = await recalculate_pwin(cur, pursuit_id, p.user_id)
+        row = await recalculate_pwin(cur, pursuit_id, p.user_id,
+                                     scenario=body.scenario)
     return row
 
 

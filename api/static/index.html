@@ -59,6 +59,27 @@ select:focus,input:focus{outline:2px solid var(--accent-lt);outline-offset:-1px}
 .g23{grid-template-columns:1.3fr 1fr}
 .g3{grid-template-columns:1fr 1fr 1fr}
 @media(max-width:1100px){.g2,.g23,.g3{grid-template-columns:1fr}}
+.dcards{grid-template-columns:repeat(auto-fit,minmax(420px,1fr));align-items:start}
+.dcard{position:relative}
+.dcard.dragging{opacity:.4}
+.dcard.drag-over{outline:2px dashed var(--accent-lt);outline-offset:2px;border-radius:var(--r)}
+.dgrip{position:absolute;top:9px;right:10px;cursor:grab;color:var(--ink-3);
+  font-size:14px;line-height:1;user-select:none;padding:3px 7px;
+  border-radius:4px;z-index:1}
+.dgrip:hover{background:var(--line)}
+.dgrip:active{cursor:grabbing}
+/* The grip sits absolutely positioned over the card's own top-right
+   corner (see .dgrip above), which is exactly where a card header's own
+   right-justified content (h3>small, e.g. "bid pursuits, cancelled
+   excluded") already lives -- .card>h3 is flex with the small pushed
+   right via margin-left:auto, so without this it renders directly under
+   the grip, clipped and hard to read. Reserve the grip's own footprint
+   as padding on the header's content box instead of overlapping it, on
+   every draggable card -- not just the ones with a <small> today, since
+   a future card could add one and hit the same overlap. Scoped to cards
+   inside .dcard only; every other view's .card>h3 (Pursuits, Revenue &
+   Profit, etc.) has no grip and is untouched. */
+.dcard>.card>h3{padding-right:44px}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   margin-bottom:11px;overflow:hidden}
 .card>h3{margin:0;padding:10px 14px;font-size:12px;font-weight:600;
@@ -207,6 +228,8 @@ tr.nobid td b{text-decoration:line-through}
 .fr.edit input[type=checkbox]{width:auto}
 .fr.dirty{background:var(--accent-tint)}
 .fr.dirty label{color:var(--accent-dk);font-weight:600}
+.q.dirty{background:var(--accent-tint)!important}
+.q.dirty label{color:var(--accent-dk);font-weight:600}
 .fr.derived .fv{color:var(--ink-2)}
 .lockwhy{margin-left:auto;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
   color:var(--ink-3);border:1px solid var(--line);border-radius:9px;padding:1px 7px;cursor:help}
@@ -367,6 +390,30 @@ const depMark=u=>{
     return `<span class="dmk dep-parent" title="${k.map(v=>oppName(v)+' (ID '+oppRef(v)+')').join(', ')}">&#8623; ${k.map(oppName).join(', ')}</span>`;}
   return '';};
 const depRow=u=>isDependent(u)?' dr-child':isDependedOn(u)?' dr-parent':'';
+
+/* Depends-on picker options for one pursuit. D.dependency_candidates is
+   the caller's own real scope (fn_user_pursuits, open pursuits only --
+   see bootstrap.py) and is the same list for every row; per-row work
+   here is just excluding what would be an obviously-wrong choice for
+   THIS pursuit specifically:
+     - itself
+     - anything that already depends on it directly (an immediate
+       2-cycle -- cheap and always correct from DEPS_OF, already built
+       in rebuildDerived())
+   A longer cycle (3+ hops) is NOT reliably detectable from this
+   client-side snapshot and is intentionally left to the server
+   (resolve_pursuit_dependency) to reject -- this is a UX nicety, not
+   the actual guard. Also injects the pursuit's CURRENTLY-set dependency
+   if it fell out of the open-candidates list (e.g. it closed after
+   being set), so the dropdown never silently shows nothing selected
+   for a real, still-set value. */
+function dependencyOptionsFor(r){
+  const cands=(D.dependency_candidates||[]).filter(c=>
+    c.uid!==r.uid && DEPS_OF[c.uid]!==r.uid);
+  if(r.dep && !cands.some(c=>c.uid===r.dep))
+    cands.unshift({uid:r.dep, name:`${oppName(r.dep)} (closed)`});
+  return cands;
+}
 
 /* Live bid/no-bid state. Toggling is a WHAT-IF on the working pipeline:
    a no-bid stops consuming B&P and stops contributing revenue immediately.
@@ -611,6 +658,12 @@ const DASH_CFG={
   market:{on:true,type:'table',label:'Revenue by market'},
   phase:{on:true,type:'table',label:'Revenue by competitive analysis phase'},
 };
+// Card display order -- drag-and-drop reorders this array; saveDashboard
+// Layout() persists it per-user (ddl/19_dashboard_layout.sql). Default is
+// simply DASH_CFG's own key order, which is also what a brand-new user
+// (or a stored layout missing a card added since) falls back to -- see
+// the merge in rebuildDerived().
+let CARD_ORDER=Object.keys(DASH_CFG);
 let cfgOpen=false;
 function cfgPanel(){
   if(!cfgOpen) return '';
@@ -641,15 +694,15 @@ function cfgPanel(){
      <td style="font-size:11px;color:var(--ink-3)">${
        k==='summary'?'Metric rows are clickable through to a filtered pursuit list'
        :k==='pwindist'?'Band widths configurable in the built version'
-       :'Drag to reorder \u2014 not wired in this prototype'}</td></tr>`).join('')}
+       :'Drag the card itself (the \u2261 handle) to reorder'}</td></tr>`).join('')}
    </tbody></table></div>
-   <div class="note"><b>What is real here:</b> show/hide, bar\u2194table\u2194combo switching, and
-     pie for the two cards it applies to (By market, By competitive analysis phase) all work.
-     Reordering and per-widget filters are not wired \u2014 this panel exists to
-     agree the shape of the feature. In the built version this is a per-user preference
-     row, not a product setting: the metrics themselves and how they are computed stay
-     fixed, because letting a client redefine "probabilistic revenue" would undermine
-     the accuracy claim.</div>
+   <div class="note"><b>What is real here:</b> show/hide, bar\u2194table\u2194combo switching,
+     pie for the two cards it applies to (By market, By competitive analysis phase), and
+     drag-to-reorder all work, and persist per user. Per-widget filters are not wired \u2014
+     this panel exists to agree the shape of that part of the feature. This is a per-user
+     preference row, not a product setting: the metrics themselves and how they are
+     computed stay fixed, because letting a client redefine "probabilistic revenue" would
+     undermine the accuracy claim.</div>
    <div class="pad" style="border-top:1px solid var(--line);display:flex;gap:8px">
      <button class="btn" id="cfgDone">Done</button>
      <button class="btn gh" id="cfgReset">Reset to default</button></div></div>`;
@@ -728,7 +781,71 @@ function vDash(){
   const bid=P.filter(x=>x.bid==='Bid').length, nobid=P.filter(x=>x.bid==='No Bid').length;
   const revS=[{name:'Target',v:YRS.map(y=>DTG[y].rev_target||0)},{name:'Probabilistic',v:byYear().map(r=>r.rev)}];
   const bpS=[{name:'Budget',v:YRS.map(y=>DTG[y].bp_budget||0)},{name:'Required',v:byYear().map(r=>r.bp)}];
-  const C=DASH_CFG, SHOW=(k,html)=>C[k].on?html:'';
+  // One entry per DASH_CFG key -- a single, self-contained <div class="card">
+  // each, so any of them can be dragged and rendered independently in
+  // whatever order CARD_ORDER says. market/phase used to be rendered as a
+  // single hard-coded pair sharing one SHOW() gate, which meant 'phase's
+  // own show/hide and chart-type controls in the config panel silently did
+  // nothing -- splitting them here both enables dragging and fixes that.
+  const CARD_HTML={
+    revenue:`<div class="card"><h3>Revenue \u2014 probabilistic vs. target <small>bid pursuits, cancelled excluded</small></h3>
+     ${chartOrTable('revenue',revS,YRS,['#B8B8B8','#3B6D11'],['Revenue target','Probabilistic revenue'])}
+     <div class="note">${selYear} probabilistic revenue is ${M(a.rev)} against a ${M(t.rev_target||0)} target \u2014 ${gap>=0?'ahead by':'short by'} ${M(Math.abs(gap))}.</div></div>`,
+    summary:`<div class="card"><h3>Portfolio summary</h3>
+     <ul class="sum">
+      <li><a onclick="goToPursuits({outcome:'OPEN'})">Open pursuits</a><span class="r num">${OPEN.length}<em>${M(sum(OPEN,x=>x.value))}</em></span></li>
+      <li><a onclick="goToPursuits({bid:'Bid'})">Bid decisions</a><span class="r num">${bid} bid / ${nobid} no-bid${
+        (P.length-bid-nobid)>0 ? `<em>${P.length-bid-nobid} undecided</em>` : ''}</span></li>
+      <li><a onclick="goToPursuits({sole:true})">Sole source</a><span class="r num">${P.filter(x=>x.sole).length}<em>${M(sum(P.filter(x=>x.sole),x=>x.value))}</em></span></li>
+      <li><a onclick="goToPursuits({dep:true})">Dependent pursuits</a><span class="r num">${P.filter(x=>x.dep).length}<em>linked</em></span></li>
+      <li><a onclick="goToPursuits({pwin:'hi'})">Pwin at or above 50%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin>=.5).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin>=.5),x=>x.value))}</em></span></li>
+      <li><a onclick="goToPursuits({pwin:'lo'})">Pwin below 20%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin<.2).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin<.2),x=>x.value))}</em></span></li>
+      <li><a onclick="show('staffing')">Peak staffing demand</a><span class="r num">${Math.max(...D.staffing.total).toFixed(0)}<em>FTE</em></span></li>
+     </ul></div>`,
+    outcomes:`<div class="card"><h3>Outcomes by year <small>decided pursuits</small></h3>
+    <div class="tw"><table><thead><tr><th>Year</th><th class="r">Won</th><th class="r">Lost</th>
+     <th class="r">Canceled</th><th class="r">Win rate (count)</th><th class="r">Won value</th><th class="r">Win rate (value)</th></tr></thead>
+    <tbody>${oyk.map(y=>{const o=oy[y],d=o.Won+o.Lost;
+      return `<tr><td class="num">${y}</td><td class="r num">${o.Won}</td><td class="r num">${o.Lost}</td>
+      <td class="r num">${o.Canceled}</td><td class="r num">${d?(o.Won/d*100).toFixed(0)+'%':'\u2014'}</td>
+      <td class="r num">${money(o.wv)}</td><td class="r num">${o.wv+o.lv?(o.wv/(o.wv+o.lv)*100).toFixed(0)+'%':'\u2014'}</td></tr>`;}).join('')}
+    </tbody><tfoot><tr><td>All</td><td class="r num">${W}</td><td class="r num">${L}</td>
+      <td class="r num">${DECIDED.filter(x=>x.outcome==='Canceled').length}</td>
+      <td class="r num">${wrC==null?'\u2014':(wrC*100).toFixed(1)+'%'}</td>
+      <td class="r num">${money(wv)}</td><td class="r num">${wrV==null?'\u2014':(wrV*100).toFixed(1)+'%'}</td></tr></tfoot></table></div>
+    <div class="note">Cancellations are excluded from win rate \u2014 a cancelled solicitation is not a loss.
+      Outcome year uses the phase-completion or cancel date where recorded, otherwise the planned award date.</div></div>`,
+    pwindist:`<div class="card"><h3>Pwin distribution <small>${OPEN_COUNTED.length} open pursuits, cancelled and no-bid excluded</small></h3>
+    ${histogram(OPEN_COUNTED.filter(x=>x.pwin!=null).map(x=>x.pwin))}
+    <div class="note">Horizontal axis is Pwin %.</div></div>`,
+    bp:`<div class="card"><h3>B&amp;P required vs. budget</h3>
+     ${chartOrTable('bp',bpS,YRS,['#B8B8B8','#8A6A17'],['Budget','Required'])}
+     <div class="note">${selYear} requires ${M(a.bp)} against ${M(t.bp_budget||0)} budgeted \u2014 ${bpv>=0?'within budget':'<b>over by '+M(-bpv)+'</b>'}.</div></div>`,
+    invchart:`<div class="card"><h3>Investment \u2014 planned vs. budget</h3>
+     ${chartOrTable('invchart',[{name:'Budget',v:YRS.map(y=>DTG[y].inv_budget||0)},{name:'Planned',v:byYear().map(r=>r.inv)}],YRS,['#B8B8B8','#3B6D11'],['Investment budget','Planned investment'])}</div>`,
+    market:`<div class="card"><h3>Revenue by market</h3>
+    ${catBody('market',grp('market',OPEN),k=>k)}
+    <div class="note">Pursuits/Value/Probabilistic here are every open pursuit; Avg Pwin is Bid only, cancelled excluded -- same rule as the rest of this dashboard.</div></div>`,
+    phase:`<div class="card"><h3>Revenue by competitive analysis phase</h3>
+    ${catBody('phase',grp('stage',OPEN),stagePill)}
+    <div class="note">Pwin precision improves once Black Hat and PTW are complete. Avg Pwin here is Bid only, cancelled excluded.</div></div>`,
+    invtable:`<div class="card"><h3>Investment by year</h3>
+    <div class="tw"><table><thead><tr><th>Year</th><th class="r">Budget</th><th class="r">Planned</th>
+      <th class="r">Variance</th><th class="r">Pursuits</th></tr></thead>
+    <tbody>${YRS.map((y,i)=>{const g=yearAgg(OPEN,i),t2=DTG[y],v=(t2.inv_budget||0)-g.inv;
+      const n=listFor().filter(x=>yearOf(x,i).inv>0).length;
+      return `<tr${y===selYear?' class="sel"':''}><td class="num">${y}</td><td class="r num">${money(t2.inv_budget||0)}</td>
+      <td class="r num">${money(g.inv)}</td><td class="r num" style="color:${v>=0?'#3B6D11':'#8C2F27'}">${v>=0?'+':''}${money(v)}</td>
+      <td class="r num">${n}</td></tr>`;}).join('')}
+    </tbody><tfoot><tr><td>Total</td><td class="r num">${money(sum(YRS,y=>DTG[y].inv_budget||0))}</td>
+      <td class="r num">${money(sum(byYear(),r=>r.inv))}</td>
+      <td class="r num">${money(sum(YRS,y=>DTG[y].inv_budget||0)-sum(byYear(),r=>r.inv))}</td><td></td></tr></tfoot></table></div></div>`,
+  };
+  const cardsHtml=CARD_ORDER.filter(k=>DASH_CFG[k].on).map(k=>
+    `<div class="dcard" draggable="true" data-card="${k}">
+      <div class="dgrip" title="Drag to reorder">\u2261</div>
+      ${CARD_HTML[k]}
+    </div>`).join('');
   $('#dash').innerHTML=cfgPanel()+`
   <div class="kpis">
     <div class="kpi hl"><div class="k">${selYear} probabilistic revenue</div><div class="v num">${M(a.rev)}</div>
@@ -742,81 +859,131 @@ function vDash(){
     <div class="kpi"><div class="k">Open pipeline</div><div class="v num">${M(sum(OPEN.filter(x=>isBid(x.uid)),x=>x.value))}</div>
       <div class="s">${OPEN.filter(x=>isBid(x.uid)).length} open &middot; ${DECIDED.filter(x=>x.outcome!=='Canceled').length} closed counted</div></div>
   </div>
-  <div class="grid g23">
-   ${SHOW('revenue',`<div class="card"><h3>Revenue \u2014 probabilistic vs. target <small>bid pursuits, cancelled excluded</small></h3>
-     ${chartOrTable('revenue',revS,YRS,['#B8B8B8','#3B6D11'],['Revenue target','Probabilistic revenue'])}
-     <div class="note">${selYear} probabilistic revenue is ${M(a.rev)} against a ${M(t.rev_target||0)} target \u2014 ${gap>=0?'ahead by':'short by'} ${M(Math.abs(gap))}.</div></div>`)}
-   ${SHOW('summary',`<div class="card"><h3>Portfolio summary</h3>
-     <ul class="sum">
-      <li><a onclick="goToPursuits({outcome:'OPEN'})">Open pursuits</a><span class="r num">${OPEN.length}<em>${M(sum(OPEN,x=>x.value))}</em></span></li>
-      <li><a onclick="goToPursuits({bid:'Bid'})">Bid decisions</a><span class="r num">${bid} bid / ${nobid} no-bid${
-        (P.length-bid-nobid)>0 ? `<em>${P.length-bid-nobid} undecided</em>` : ''}</span></li>
-      <li><a onclick="goToPursuits({sole:true})">Sole source</a><span class="r num">${P.filter(x=>x.sole).length}<em>${M(sum(P.filter(x=>x.sole),x=>x.value))}</em></span></li>
-      <li><a onclick="goToPursuits({dep:true})">Dependent pursuits</a><span class="r num">${P.filter(x=>x.dep).length}<em>linked</em></span></li>
-      <li><a onclick="goToPursuits({pwin:'hi'})">Pwin at or above 50%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin>=.5).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin>=.5),x=>x.value))}</em></span></li>
-      <li><a onclick="goToPursuits({pwin:'lo'})">Pwin below 20%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin<.2).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin<.2),x=>x.value))}</em></span></li>
-      <li><a onclick="show('staffing')">Peak staffing demand</a><span class="r num">${Math.max(...D.staffing.total).toFixed(0)}<em>FTE</em></span></li>
-     </ul></div>`)}
-  </div>
-  <div class="grid g23">
-   ${SHOW('outcomes',`<div class="card"><h3>Outcomes by year <small>decided pursuits</small></h3>
-    <div class="tw"><table><thead><tr><th>Year</th><th class="r">Won</th><th class="r">Lost</th>
-     <th class="r">Canceled</th><th class="r">Win rate (count)</th><th class="r">Won value</th><th class="r">Win rate (value)</th></tr></thead>
-    <tbody>${oyk.map(y=>{const o=oy[y],d=o.Won+o.Lost;
-      return `<tr><td class="num">${y}</td><td class="r num">${o.Won}</td><td class="r num">${o.Lost}</td>
-      <td class="r num">${o.Canceled}</td><td class="r num">${d?(o.Won/d*100).toFixed(0)+'%':'\u2014'}</td>
-      <td class="r num">${money(o.wv)}</td><td class="r num">${o.wv+o.lv?(o.wv/(o.wv+o.lv)*100).toFixed(0)+'%':'\u2014'}</td></tr>`;}).join('')}
-    </tbody><tfoot><tr><td>All</td><td class="r num">${W}</td><td class="r num">${L}</td>
-      <td class="r num">${DECIDED.filter(x=>x.outcome==='Canceled').length}</td>
-      <td class="r num">${wrC==null?'\u2014':(wrC*100).toFixed(1)+'%'}</td>
-      <td class="r num">${money(wv)}</td><td class="r num">${wrV==null?'\u2014':(wrV*100).toFixed(1)+'%'}</td></tr></tfoot></table></div>
-    <div class="note">Cancellations are excluded from win rate \u2014 a cancelled solicitation is not a loss.
-      Outcome year uses the phase-completion or cancel date where recorded, otherwise the planned award date.</div></div>`)}
-   ${SHOW('pwindist',`<div class="card"><h3>Pwin distribution <small>${OPEN_COUNTED.length} open pursuits, cancelled and no-bid excluded</small></h3>
-    ${histogram(OPEN_COUNTED.filter(x=>x.pwin!=null).map(x=>x.pwin))}
-    <div class="note">Horizontal axis is Pwin %.</div></div>`)}
-  </div>
-  <div class="grid g2">
-   ${SHOW('bp',`<div class="card"><h3>B&amp;P required vs. budget</h3>
-     ${chartOrTable('bp',bpS,YRS,['#B8B8B8','#8A6A17'],['Budget','Required'])}
-     <div class="note">${selYear} requires ${M(a.bp)} against ${M(t.bp_budget||0)} budgeted \u2014 ${bpv>=0?'within budget':'<b>over by '+M(-bpv)+'</b>'}.</div></div>`)}
-   ${SHOW('invchart',`<div class="card"><h3>Investment \u2014 planned vs. budget</h3>
-     ${chartOrTable('invchart',[{name:'Budget',v:YRS.map(y=>DTG[y].inv_budget||0)},{name:'Planned',v:byYear().map(r=>r.inv)}],YRS,['#B8B8B8','#3B6D11'],['Investment budget','Planned investment'])}</div>`)}
-  </div>
-  <div class="grid g2">
-   ${SHOW('market',`<div class="card"><h3>Revenue by market</h3>
-    ${catBody('market',grp('market',OPEN),k=>k)}
-    <div class="note">Pursuits/Value/Probabilistic here are every open pursuit; Avg Pwin is Bid only, cancelled excluded -- same rule as the rest of this dashboard.</div></div>
-   <div class="card"><h3>Revenue by competitive analysis phase</h3>
-    ${catBody('phase',grp('stage',OPEN),stagePill)}
-    <div class="note">Pwin precision improves once Black Hat and PTW are complete. Avg Pwin here is Bid only, cancelled excluded.</div></div>`)}
-  </div>
-  ${SHOW('invtable',`<div class="card"><h3>Investment by year</h3>
-    <div class="tw"><table><thead><tr><th>Year</th><th class="r">Budget</th><th class="r">Planned</th>
-      <th class="r">Variance</th><th class="r">Pursuits</th></tr></thead>
-    <tbody>${YRS.map((y,i)=>{const g=yearAgg(OPEN,i),t2=DTG[y],v=(t2.inv_budget||0)-g.inv;
-      const n=listFor().filter(x=>yearOf(x,i).inv>0).length;
-      return `<tr${y===selYear?' class="sel"':''}><td class="num">${y}</td><td class="r num">${money(t2.inv_budget||0)}</td>
-      <td class="r num">${money(g.inv)}</td><td class="r num" style="color:${v>=0?'#3B6D11':'#8C2F27'}">${v>=0?'+':''}${money(v)}</td>
-      <td class="r num">${n}</td></tr>`;}).join('')}
-    </tbody><tfoot><tr><td>Total</td><td class="r num">${money(sum(YRS,y=>DTG[y].inv_budget||0))}</td>
-      <td class="r num">${money(sum(byYear(),r=>r.inv))}</td>
-      <td class="r num">${money(sum(YRS,y=>DTG[y].inv_budget||0)-sum(byYear(),r=>r.inv))}</td><td></td></tr></tfoot></table></div></div>`)}`;
+  <div class="grid dcards" id="dcards">${cardsHtml}</div>`;
   $$('#dash [data-cfg]').forEach(c=>c.onchange=e=>{DASH_CFG[e.target.dataset.cfg].on=e.target.checked;vDash();});
   $$('#dash [data-cfgt]').forEach(s=>s.onchange=e=>{DASH_CFG[e.target.dataset.cfgt].type=e.target.value;vDash();});
   const cd=$('#cfgDone'); if(cd) cd.onclick=()=>{cfgOpen=false;vDash();};
   const cr=$('#cfgReset'); if(cr) cr.onclick=()=>{Object.keys(DASH_CFG).forEach(k=>DASH_CFG[k].on=true);vDash();};
+  wireDashDrag();
+}
+
+/* ---------- dashboard card drag-and-drop ----------
+   Vanilla HTML5 drag-and-drop, delegated per-card rather than on the
+   container: vDash() replaces #dcards' innerHTML on every render (a
+   filter change, a toggle in the config panel, another user's edit
+   arriving), so listeners must be rebound every time anyway -- same
+   discipline as every other post-render wiring call in this view. */
+let dragSrcCard=null;
+function wireDashDrag(){
+  $$('#dcards .dcard').forEach(el=>{
+    el.ondragstart=e=>{
+      dragSrcCard=el.dataset.card;
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain',dragSrcCard);
+    };
+    el.ondragend=()=>{
+      el.classList.remove('dragging');
+      $$('#dcards .dcard').forEach(x=>x.classList.remove('drag-over'));
+    };
+    el.ondragover=e=>{
+      e.preventDefault();
+      e.dataTransfer.dropEffect='move';
+      if(el.dataset.card!==dragSrcCard) el.classList.add('drag-over');
+    };
+    el.ondragleave=()=>el.classList.remove('drag-over');
+    el.ondrop=e=>{
+      e.preventDefault();
+      el.classList.remove('drag-over');
+      const targetKey=el.dataset.card;
+      if(!dragSrcCard || dragSrcCard===targetKey) return;
+      const from=CARD_ORDER.indexOf(dragSrcCard), to=CARD_ORDER.indexOf(targetKey);
+      if(from<0 || to<0) return;
+      CARD_ORDER.splice(from,1);
+      CARD_ORDER.splice(to,0,dragSrcCard);
+      saveDashboardLayout();
+      vDash();
+    };
+  });
+}
+async function saveDashboardLayout(){
+  try{
+    const r=await fetch('/api/dashboard-layout',{method:'PUT',credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({card_order:CARD_ORDER})});
+    if(r.status===401){ showLogin(); return; }
+    if(!r.ok) throw new Error(`save failed (${r.status})`);
+  }catch(e){
+    // The visual reorder already happened (CARD_ORDER + vDash() ran
+    // before this call); a failed save just means it won't survive a
+    // reload, worth telling the user rather than failing silently.
+    toast(`Could not save dashboard layout: ${e.message}`, true);
+  }
 }
 
 /* ---------- Pursuits ---------- */
 let sortKey='value',sortDir=-1,selUid=null;
 let pageSize=50, page=1, detailMode=false;
 let historyUid=null;   // which pursuit #histBody's current content belongs to
+// Which scenario's questionnaire answers the Pwin assessment card shows,
+// for a dependent pursuit -- 'BASE' or 'DEPENDENT_WON'. Reset to 'BASE'
+// whenever a DIFFERENT pursuit's detail opens (qScenarioUid guards this
+// the same way editUid guards editBuf, just below), so switching
+// pursuits never carries the previous one's scenario selection along.
+let qScenario='BASE', qScenarioUid=null;
+// Pending, unsaved questionnaire answer changes -- keyed by DB question
+// code (TM1A, ..., P2), same shape and lifecycle as editBuf (the save
+// bar's dirty count and Save/Discard both cover both buffers, see
+// refreshEditBar()/saveEdits()), but sent to a DIFFERENT endpoint
+// (PATCH .../answers, not PATCH the pursuit itself) since these were
+// never real pursuit fields -- reusing the save-bar UI and dirty-field
+// highlighting, not inventing a second endpoint call disguised as the
+// same buffer. Cleared whenever the pursuit changes (editUid guard) or
+// the viewed scenario changes (qStepBase/qStepDep) -- an unsaved BASE
+// edit must never be silently carried over and saved against
+// DEPENDENT_WON, or vice versa.
+let qBuf={};
+// Which view exiting the pursuit detail should return to -- captured in
+// openPursuitDetail() from `cur` (show()'s own "currently visible view"
+// tracker), at the moment BEFORE that call site switches to 'pursuits'
+// to actually display the detail. Persists across a save/reload/Prev-
+// Next while inside detail (none of those touch it), so it still points
+// at the real origin no matter how long the user stays in detail before
+// backing out. Defaults to 'pursuits' -- the one origin that never
+// needs a view switch to begin with, so it's also the safe fallback if
+// something somehow opens detail without going through
+// openPursuitDetail() at all.
+let returnView='pursuits';
 let FLT={market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:'',sole:''};
 // Navigate from the dashboard summary to Pursuits, pre-filtered.
 // Resets every other filter first: arriving with a stale filter from an
 // earlier visit would silently hide pursuits the click implied should
 // be visible.
+// The one way ANY view opens a specific pursuit's detail. Detail always
+// renders inside #pursuits (see vPursuits()'s own detailMode check and
+// detailView()), regardless of which view the click came from -- so a
+// caller elsewhere in the app (B&P and Investment's own tables, e.g.)
+// must also switch to the pursuits view itself, same as goToPursuits()
+// does below. Deliberately does NOT call show() itself: the in-list row
+// click handler (vPursuits(), just below) is already ON that view and
+// must not re-trigger show()'s window.scrollTo(0,0) -- the exact
+// regression a previous round fixed. Callers switching views call
+// show('pursuits') themselves right after, same as goToPursuits does.
+//
+// `cur` (show()'s own tracker) is still whatever view was visible
+// BEFORE this call -- captured here as returnView, before any call
+// site's own show('pursuits') overwrites `cur` to switch the display.
+// This is what makes exiting detail (back(), in detailView()) return to
+// the real origin instead of a hardcoded 'pursuits' -- a real, reported
+// bug once B&P/Investment started opening detail directly too, since
+// they need the view switch on entry but a hardcoded exit ignored where
+// that switch came FROM.
+window.openPursuitDetail = function(uid){
+  returnView = cur;
+  selUid = uid;
+  detailMode = true;
+  vPursuits();
+};
 window.goToPursuits = function(f){
   FLT = {market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:'',sole:''};
   Object.assign(FLT, f);
@@ -984,7 +1151,7 @@ function vPursuits(){
     if(['INPUT','SELECT','BUTTON','LABEL','OPTION'].includes(e.target.tagName)) return;
     // uid is the opportunity id, a STRING. Do not coerce -- +"1146" === 1146
     // never matches x.uid === "1146", and the detail view silently fails.
-    selUid=tr.dataset.uid;detailMode=true;vPursuits();});
+    openPursuitDetail(tr.dataset.uid);});
   $$('.filters [data-f]').forEach(s=>s.onchange=e=>{FLT[e.target.dataset.f]=e.target.value;vPursuits();});
   $('#fq').oninput=e=>{FLT.q=e.target.value;const p=e.target.selectionStart;vPursuits();
     const n=$('#fq');n.focus();n.setSelectionRange(p,p);};
@@ -1124,7 +1291,7 @@ function renderQ(ans,baseAns,type,editable){
 function detailView(uid){
   const r=P.find(x=>x.uid===uid);
   if(!r){                      // filtered out, or an id that no longer exists
-    detailMode=false; selUid=null; vPursuits();
+    detailMode=false; selUid=null; vPursuits(); show(returnView);
     toast('That pursuit is no longer available.', true);
     return;
   }
@@ -1152,9 +1319,33 @@ function detailView(uid){
   const outside=Math.max(0,(r.prob||0)-s5.rev);
   const priorAmt=prior?outside*(later?0.5:1):0, laterAmt=later?outside-priorAmt:0;
   const closed = !!r.outcome;
-  if(editUid !== uid){ editBuf = {}; editUid = uid; }
+  if(editUid !== uid){ editBuf = {}; qBuf = {}; editUid = uid; }
+  if(qScenarioUid !== uid){ qScenario = 'BASE'; qScenarioUid = uid; }
   const fld=(lbl,val,edit=true)=>`<div class="fr"><label>${lbl}</label>
     <div class="fv">${val}${edit?'<span class="pen">&#9998;</span>':''}</div></div>`;
+  // Which questionnaire answers the Pwin assessment card shows. A
+  // dependent pursuit has TWO scenarios worth of stored answers (see
+  // bootstrap.py); an independent one only ever has BASE, so
+  // showingDepScenario is always false for it regardless of qScenario.
+  const showingDepScenario = !!r.dep && qScenario === 'DEPENDENT_WON';
+  const depAnswers = r.dependent_won_answers || {};
+  const depAssessed = Object.keys(depAnswers).length > 0;
+  const qAnswers = showingDepScenario ? depAnswers : r.answers;
+  // The scenario badge's own Pwin readout -- the CURRENTLY-viewed
+  // scenario's own stored value, deliberately separate from the KPI
+  // strip's "Pwin"/"Base Pwin" tiles above (both BASE-only; blending
+  // BASE+DEPENDENT_WON into one true "effective Pwin" is real but
+  // separate, unbuilt work, not this round's scope). null (not 0%) for
+  // a scenario that has never been recalculated, so it reads as "not
+  // yet calculated" rather than a real zero.
+  const shownScenarioPwin = showingDepScenario ? r.dependent_won_pwin : r.pwin;
+  // Past Pre-BH, bhptwCard (above) already explains the two-scenario
+  // requirement and has its OWN Base/Dependent-won toggle for the Black
+  // Hat/PTW analysis -- a second copy of the same paragraph here, for
+  // a DIFFERENT toggle governing the original TM-questionnaire below,
+  // read the first time as a duplicate rather than two distinct
+  // controls. Shorten this one whenever that's already on screen.
+  const bhptwShown = !!(r.stage && r.stage !== 'Pre-BH' && !r.sole);
   $('#pursuits').innerHTML=`
   <div class="dtbar">
     <button class="btn gh" id="dBack">&larr; Back to pursuits</button>
@@ -1214,7 +1405,10 @@ function detailView(uid){
           ${(REF?REF.outcomes:[]).map(o=>
             `<option value="${o.code}" ${r.outcome&&r.outcome.toUpperCase()===o.code?'selected':''}>${o.label}</option>`).join('')}
         </select>${closed?'<span class="fnote" style="margin-left:10px">A closed pursuit cannot be edited. Set this back to Open to make changes.</span>':''}</div></div>
-      ${r.dep?fieldRow({v:`<b>${oppName(r.dep)}</b> (ID ${oppRef(r.dep)})`},'v','Depends on'):''}
+      ${fieldRow({...r, dependsOn:r.dep},'dependsOn','Depends on',
+        {type:'select', blank:true,
+         options: dependencyOptionsFor(r).map(c=>({code:c.uid, label:`${c.name} (ID ${c.uid})`})),
+         note:'If the pursuit chosen here is later won, this one gets a Pwin lift -- see the scenario badge on the Pwin assessment below. Only your own open pursuits are offered.'})}
       ${DEPENDENTS[r.uid]?`<div class="fr derived"><label>Depended on by</label>
         <div class="fv">${DEPENDENTS[r.uid].map(v=>`${oppName(v)} (ID ${oppRef(v)})`).join(', ')}</div></div>`:''}
     </div>
@@ -1230,11 +1424,17 @@ function detailView(uid){
       <div>Probabilistic revenue<b>${M(r.prob)}</b></div>
     </div>
     ${r.dep?`<div class="note" style="background:#EAF3DE;color:#2C5209;padding:9px 14px">
-      Dependent pursuit. Two assessments are required \u2014 one assuming
+      ${bhptwShown
+        ? `The original competitive questionnaire below also has two scenarios.`
+        : `Dependent pursuit. Two assessments are required \u2014 one assuming
       <b>${oppName(r.dep)}</b> is lost, one assuming it is won. Both must be
-      answered before this pursuit can be saved.
-      <div style="margin-top:7px"><button class="btn gh" style="padding:2px 9px;font-size:11px">Base (no lift)</button>
-      <button class="btn gh" style="padding:2px 9px;font-size:11px">If ${oppName(r.dep)} is won</button></div></div>`:''}
+      answered before this pursuit can be saved.`}
+      <div style="margin-top:7px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <button class="btn ${showingDepScenario?'gh':''}" id="qStepBase" style="padding:2px 9px;font-size:11px">Base (no lift)</button>
+      <button class="btn ${showingDepScenario?'':'gh'}" id="qStepDep" style="padding:2px 9px;font-size:11px">If ${oppName(r.dep)} is won${depAssessed?' \u2713':''}</button>
+      <span id="qScenarioBadge" class="pill ${showingDepScenario?'p-ptw':'p-pre'}">Showing: ${showingDepScenario?`If ${oppName(r.dep)} is won`:'Base (no lift)'}</span>
+      <span style="font-size:11px;color:var(--ink-3)">This scenario's Pwin: <b id="qScenarioPwin" style="color:var(--ink)">${shownScenarioPwin==null?'not yet calculated':pwinPct(shownScenarioPwin)}</b></span>
+      </div></div>`:''}
     ${r.sole
       ? `<div class="note" style="background:var(--accent-tint);color:var(--accent-dk);padding:11px 14px">
            <b>Sole source \u2014 no competitive assessment.</b> With one bidder the
@@ -1242,7 +1442,10 @@ function detailView(uid){
            all, not a competitor winning. The questionnaire below is retained
            for history but does not drive this pursuit's Pwin.</div>
          <div class="qa locked">${renderQ(r.answers,r.answers,r.type,false)}</div>`
-      : `<div class="qa">${renderQ(r.answers,r.answers,r.type,!closed)}</div>`}
+      : `${(showingDepScenario && !depAssessed)
+          ? `<div class="note" style="padding:9px 14px;color:#888">No dependent-won assessment recorded yet -- answer the questionnaire below and Save.</div>`
+          : ''}
+        <div class="qa">${renderQ(qAnswers,qAnswers,r.type,!closed)}</div>`}
     ${r.sole ? '' : `<div class="fr edit" style="border-top:1px solid var(--line)">
        <label>Expected bidders
          <span class="qhelp" onclick="showHelp('Bidders','')" title="What does this mean?">?</span></label>
@@ -1283,10 +1486,17 @@ function detailView(uid){
   if(r.stage && r.stage !== 'Pre-BH' && !r.sole) wireBhPtwCard(uid, r);
 
   const back=()=>{
-    if(Object.keys(editBuf).length &&
+    if((Object.keys(editBuf).length || Object.keys(qBuf).length) &&
        !confirm('You have unsaved changes. Leave and discard them?')) return;
-    editBuf={}; editUid=null; presenceStop();
-    detailMode=false; vPursuits(); window.scrollTo(0,0);};
+    editBuf={}; qBuf={}; editUid=null; presenceStop();
+    // vPursuits() rebuilds #pursuits' own content back to the list
+    // (it currently holds this detail's markup) regardless of which
+    // view ends up visible; show(returnView) is what actually navigates
+    // back to wherever the pursuit was opened FROM -- B&P, Investment,
+    // or Pursuits itself (returnView's own default) -- rather than the
+    // old hardcoded 'pursuits'. show() already does window.scrollTo(0,0)
+    // itself, so no separate call is needed here any more.
+    detailMode=false; vPursuits(); show(returnView);};
   $('#dBack').onclick=back;
 
   /* DO NOT re-render the whole view on change. Clicking Save blurs the
@@ -1298,15 +1508,20 @@ function detailView(uid){
   // that assumption is what broke this before.
   const refreshEditBar = ()=>{
     const slot = $('#editBarSlot');
-    const n = Object.keys(editBuf).length;
+    // ONE combined count, ONE bar, covering both buffers -- editBuf
+    // (pursuit fields) and qBuf (questionnaire answers). They save
+    // through two different endpoints (see saveEdits()) but that is an
+    // implementation detail; from the save-bar's own point of view this
+    // is "how many things are unsaved right now".
+    const n = Object.keys(editBuf).length + Object.keys(qBuf).length;
     if(!slot) return;
-    slot.innerHTML = n ? editBar() : '';
+    slot.innerHTML = n ? editBar(n) : '';
     if(n){
       $('#edSave').onclick = ()=>saveEdits(uid);
-      $('#edCancel').onclick = ()=>{editBuf={};detailView(uid);};
+      $('#edCancel').onclick = ()=>{editBuf={};qBuf={};detailView(uid);};
     }
   };
-  refreshEditBar();   // reflect editBuf immediately on every (re)draw
+  refreshEditBar();   // reflect editBuf/qBuf immediately on every (re)draw
 
   $$('#pursuits [data-ed]').forEach(el=>{
     el.disabled = closed;
@@ -1349,6 +1564,27 @@ function detailView(uid){
     // container rather than one.
     await saveBid(uid, e.target.checked);};
   $('#dCalc').onclick=()=>recalculatePwin(uid);
+  // Same buffer/dirty-highlight pattern as every other pursuit field
+  // (data-ed above) -- data-a is renderQ()'s own attribute, shared with
+  // the Scenario Sandbox's unrelated wiring, so this is scoped to the
+  // detail view's own .qa container specifically, never touching
+  // #sbq's separate handler. Converts the UI's spaced key ('TM 1a') to
+  // the DB code ('TM1A') the same way Sandbox's own SCORED_UI_KEYS
+  // already does, since qBuf is keyed by DB code (what the save
+  // endpoint expects), not the display key.
+  $$('#pursuits .qa select[data-a]').forEach(sel=>sel.onchange=e=>{
+    const code = e.target.dataset.a.replace(/\s+/g,'').toUpperCase();
+    qBuf[code] = e.target.value;
+    e.target.closest('.q').classList.add('dirty');
+    refreshEditBar();
+  });
+  const switchScenario=s=>{
+    if(Object.keys(qBuf).length &&
+       !confirm('You have unsaved questionnaire changes. Switch scenario and discard them?')) return;
+    qBuf={}; qScenario=s; detailView(uid);
+  };
+  const qsb=$('#qStepBase'); if(qsb) qsb.onclick=()=>switchScenario('BASE');
+  const qsd=$('#qStepDep'); if(qsd) qsd.onclick=()=>switchScenario('DEPENDENT_WON');
   const step=d=>{const list=[...P]; const i=list.findIndex(x=>x.uid===uid);
     const n=list[(i+d+list.length)%list.length];
     presenceStop(); selUid=n.uid; detailView(n.uid); window.scrollTo(0,0);};
@@ -1363,11 +1599,20 @@ function detailView(uid){
 async function recalculatePwin(uid){
   const r = P.find(x=>x.uid===uid);
   if(!r) return;
+  // Recalculate always applies to whichever scenario is CURRENTLY being
+  // viewed (qScenario) -- previously this endpoint had no scenario
+  // concept at all and only ever touched BASE, so a DEPENDENT_WON view
+  // could never be recalculated regardless of what was on screen. See
+  // recalc.py's own note on why this was the one place that hadn't
+  // caught up with Black Hat/PTW's existing per-scenario support.
+  const scenario = qScenario;
   const btn = document.getElementById('dCalc');
   if(btn){ btn.disabled = true; btn.textContent = 'Recalculating\u2026'; }
   try{
     const res = await fetch(`/api/pursuits/${r.id}/recalculate`, {
-      method:'POST', credentials:'same-origin'});
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({scenario})});
     if(res.status===401){ showLogin(); return; }
     const body = await res.json().catch(()=>({}));
     if(!res.ok){
@@ -1380,7 +1625,8 @@ async function recalculatePwin(uid){
     await loadData();               // see saveEdits' own comment on this
     selUid = uid; detailMode = true; // exact restore, same reason
     detailView(uid);
-    toast(`Recalculated: Pwin ${pwinPct(body.pwin)}.`);
+    toast(`Recalculated (${scenario==='BASE'?'Base':'If '+oppName(r.dep)+' is won'}): `
+      + `Pwin ${pwinPct(body.pwin)}.`);
   }catch(e){ toast(`Could not reach the Pwin engine: ${e.message}`, true); }
 }
 
@@ -1780,7 +2026,7 @@ function vBP(){
   <div class="card"><h3>Largest B&amp;P commitments <small>top 12 open pursuits</small></h3>
    <div class="tw"><table><thead><tr><th>Opportunity name</th><th>Market</th><th class="r">Award value</th>
      <th class="r">B&amp;P required</th><th class="r">B&amp;P as % of value</th><th class="r">Pwin</th></tr></thead>
-   <tbody>${top.map(r=>`<tr class="${depRow(r.uid).trim()}"><td><b>${r.name}</b>${depMark(r.uid)}</td><td>${r.market}</td><td class="r num">${money(r.value)}</td>
+   <tbody>${top.map(r=>`<tr class="click${depRow(r.uid)}" data-uid="${r.uid}"><td><b>${r.name}</b>${depMark(r.uid)}</td><td>${r.market}</td><td class="r num">${money(r.value)}</td>
      <td class="r num">${money(r.bp)}</td><td class="r num">${r.value?(r.bp/r.value*100).toFixed(2):'\u2014'}%</td>
      <td class="r">${pwinCell(effectivePwin(r))}</td></tr>`).join('')}</tbody></table></div></div>
   <div class="card"><h3>Largest investment commitments
@@ -1788,7 +2034,7 @@ function vBP(){
    <div class="tw"><table><thead><tr><th>Opportunity name</th><th>Market</th><th>Opportunity type</th>
      <th class="r">Award value</th><th class="r">Invest %</th><th class="r">Investment</th>
      <th class="r">Pwin</th><th class="r">$ per Pwin point</th></tr></thead>
-   <tbody>${inv.length?inv.map(r=>`<tr class="${depRow(r.uid).trim()}">
+   <tbody>${inv.length?inv.map(r=>`<tr class="click${depRow(r.uid)}" data-uid="${r.uid}">
      <td><b>${r.name}</b>${depMark(r.uid)}</td><td>${r.market}</td>
      <td style="font-size:11px;color:var(--ink-2)">${(r.type||'\u2014').slice(0,38)}</td>
      <td class="r num">${money(r.value)}</td>
@@ -1804,6 +2050,15 @@ function vBP(){
      where a well-performing incumbent has to be displaced. The last column is a crude
      efficiency screen: dollars committed per point of Pwin. It only means anything compared
      before and after a recalculation in the sandbox.</div></div>`;
+  // Same row-click-to-detail pattern as the Pursuits list (openPursuitDetail,
+  // above) -- reused, not reimplemented. Unlike that list, these rows have no
+  // per-row controls (no bid toggle, nothing focusable), so no click-target
+  // guard is needed. #bp is a different view from #pursuits, so this also
+  // has to switch to it -- same as goToPursuits() does.
+  $$('#bp tbody tr.click').forEach(tr=>tr.onclick=()=>{
+    openPursuitDetail(tr.dataset.uid);
+    show('pursuits');
+  });
 }
 
 /* ---------- Targets ---------- */
@@ -2394,7 +2649,19 @@ const UI_TO_API = {name:'name', opp_id:'external_opportunity_id',
   sole:'is_sole_source', bidders:'bidders',
   value:'planned_total_award_value', due:'proposal_due_date',
   award:'contract_award_date', end:'period_end_date',
-  inv:'planned_investment'};
+  inv:'planned_investment',
+  // 'owner' was missing here entirely -- the Owner/POC <select> rendered
+  // real candidates and looked fully functional, but choosing one never
+  // reached editBuf (fieldRow's onchange handler bails out whenever
+  // UI_TO_API[key] is undefined), so Save silently never included it.
+  // Found and fixed while building the Depends-on picker below on the
+  // same pattern -- confirmed live: selecting an owner now populates
+  // editBuf and the Save bar appears, where before neither did.
+  owner:'owner_user_id',
+  // Depends-on resolves by OPPORTUNITY ID server-side (resolve_pursuit_
+  // dependency), the same identifier oppRef/depMark already display
+  // everywhere a pursuit references another -- not the raw pursuit uuid.
+  dependsOn:'depends_on_opp_id'};
 
 const isAdmin = ()=> !!(D.user && (D.user.roles||[]).includes('admin'));
 // Matches PUT /api/plan-years/{year}'s require_role("admin","executive")
@@ -2474,8 +2741,8 @@ function fieldRow(r, key, label, opts){
     <div class="fv">${input}${opts.note?`<span class="fnote${opts.warnNote?' warn':''}">${opts.note}</span>`:''}</div></div>`;
 }
 
-function editBar(){
-  const n = Object.keys(editBuf).length;
+function editBar(n){
+  if(n==null) n = Object.keys(editBuf).length;   // other callers, unchanged
   if(!n) return '';
   return `<div class="editbar"><b>${n}</b> unsaved change${n>1?'s':''}
     <span><button class="btn" id="edSave">Save</button>
@@ -2484,60 +2751,94 @@ function editBar(){
 
 async function saveEdits(uid){
   const r = P.find(x=>x.uid===uid);
-  if(!r || !Object.keys(editBuf).length) return;
-  const payload = {expected_updated_at: r.updated_at, ...editBuf};
-  try{
-    const res = await fetch(`/api/pursuits/${r.id}`, {
-      method:'PATCH', credentials:'same-origin',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)});
-    if(res.status===401){ showLogin(); return; }
-    const body = await res.json().catch(()=>({}));
-    if(res.status===409){
-      const d = body.detail || {};
-      if(d.error==='modified'){
-        toast(`${d.message} Changed by ${d.changed_by||'someone else'}. `
-              + `Reload to see their version.`, true);
+  const hasFields = Object.keys(editBuf).length;
+  const hasAnswers = Object.keys(qBuf).length;
+  if(!r || (!hasFields && !hasAnswers)) return;
+
+  // Two different endpoints (questionnaire answers were never real
+  // pursuit fields -- see qBuf's own comment), one Save click. Pursuit
+  // fields first, then answers; each buffer clears only once ITS OWN
+  // call succeeds, so a failure in one leaves the other's already-saved
+  // state alone rather than re-prompting to re-save something that
+  // already landed.
+  let pwinNeedsRecalc = false, staleSolePwin = null;
+  if(hasFields){
+    const payload = {expected_updated_at: r.updated_at, ...editBuf};
+    try{
+      const res = await fetch(`/api/pursuits/${r.id}`, {
+        method:'PATCH', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)});
+      if(res.status===401){ showLogin(); return; }
+      const body = await res.json().catch(()=>({}));
+      if(res.status===409){
+        const d = body.detail || {};
+        if(d.error==='modified'){
+          toast(`${d.message} Changed by ${d.changed_by||'someone else'}. `
+                + `Reload to see their version.`, true);
+          return;
+        }
+        toast(typeof d==='string'?d:(d.message||'Conflict'), true);
         return;
       }
-      toast(typeof d==='string'?d:(d.message||'Conflict'), true);
-      return;
-    }
-    if(!res.ok){
-      const msg = typeof body.detail==='string' ? body.detail
-                : (body.detail && body.detail[0] && body.detail[0].msg)
-                  || `save failed (${res.status})`;
-      toast(msg, true); return;
-    }
-    editBuf = {}; editUid = null;
-    await loadData();              // re-read so derived values refresh too
-    // loadData() unconditionally resets selUid/detailMode to null/false
-    // (correct for a real navigation or tenant switch) -- but a save
-    // stays IN this same detail view, so they must be restored before
-    // detailView() renders, or any async follow-up render gated on them
-    // (bhptwCard's own loadBhPtw callback, specifically) silently never
-    // fires once its fetch resolves: the real Black Hat/PTW data arrives
-    // but the "Loading..." placeholder never gets replaced, and nothing
-    // short of navigating away and back (or a manual refresh, which
-    // re-sets these the normal way) recovers it.
-    selUid = uid; detailMode = true;
-    detailView(uid);
-    // Sole source was turned off but the stored Pwin is still the 95%
-    // business-rule value -- it no longer describes a competitive
-    // situation and must not be trusted for this pursuit until it is
-    // recalculated. Real popup, not a toast: this is a data-integrity
-    // condition, not routine confirmation, and should require dismissal.
-    if(body.pwin_needs_recalc){
-      alert(`Saved. This pursuit is no longer sole source, but its Pwin `
-        + `(${pwinPct(body.pwin)}) still reflects the sole-source rule, `
-        + `not a competitive assessment.
+      if(!res.ok){
+        const msg = typeof body.detail==='string' ? body.detail
+                  : (body.detail && body.detail[0] && body.detail[0].msg)
+                    || `save failed (${res.status})`;
+        toast(msg, true); return;
+      }
+      editBuf = {};
+      pwinNeedsRecalc = !!body.pwin_needs_recalc;
+      staleSolePwin = body.pwin;
+    }catch(e){ toast(`Could not save: ${e.message}`, true); return; }
+  }
+
+  if(hasAnswers){
+    try{
+      const res = await fetch(`/api/pursuits/${r.id}/answers`, {
+        method:'PATCH', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({scenario: qScenario, answers: qBuf})});
+      if(res.status===401){ showLogin(); return; }
+      if(!res.ok){
+        const body = await res.json().catch(()=>({}));
+        const msg = typeof body.detail==='string' ? body.detail
+                  : (body.detail && body.detail[0] && body.detail[0].msg)
+                    || `save failed (${res.status})`;
+        toast(msg, true); return;
+      }
+      qBuf = {};
+    }catch(e){ toast(`Could not save: ${e.message}`, true); return; }
+  }
+
+  editUid = null;
+  await loadData();              // re-read so derived values refresh too
+  // loadData() unconditionally resets selUid/detailMode to null/false
+  // (correct for a real navigation or tenant switch) -- but a save
+  // stays IN this same detail view, so they must be restored before
+  // detailView() renders, or any async follow-up render gated on them
+  // (bhptwCard's own loadBhPtw callback, specifically) silently never
+  // fires once its fetch resolves: the real Black Hat/PTW data arrives
+  // but the "Loading..." placeholder never gets replaced, and nothing
+  // short of navigating away and back (or a manual refresh, which
+  // re-sets these the normal way) recovers it.
+  selUid = uid; detailMode = true;
+  detailView(uid);
+  // Sole source was turned off but the stored Pwin is still the 95%
+  // business-rule value -- it no longer describes a competitive
+  // situation and must not be trusted for this pursuit until it is
+  // recalculated. Real popup, not a toast: this is a data-integrity
+  // condition, not routine confirmation, and should require dismissal.
+  if(pwinNeedsRecalc){
+    alert(`Saved. This pursuit is no longer sole source, but its Pwin `
+      + `(${pwinPct(staleSolePwin)}) still reflects the sole-source rule, `
+      + `not a competitive assessment.
 
 Answer the Pwin questionnaire `
-        + `and click Recalculate Pwin before relying on this number.`);
-    } else {
-      toast('Saved.');
-    }
-  }catch(e){ toast(`Could not save: ${e.message}`, true); }
+      + `and click Recalculate Pwin before relying on this number.`);
+  } else {
+    toast('Saved.');
+  }
 }
 
 async function setOutcome(uid, outcome, alsoBid){
@@ -2793,7 +3094,20 @@ async function saveBid(uid, wantBid){
   // list vs. detail via detailMode) -- show(cur) adds nothing when the
   // view hasn't actually changed except its own window.scrollTo(0,0),
   // which yanked the page back to top on every single toggle click.
+  //
+  // render() rebuilds #pursuits' entire innerHTML, which also destroys
+  // and recreates the pursuits table's OWN internal scroll region
+  // (.pursuits-scroll, max-height+overflow-y:auto) -- a fresh DOM node
+  // always starts at scrollTop 0. Confirmed live: even a single toggle
+  // click while scrolled down within a long list drops the table back
+  // to its own top, with no window-level scroll movement to show for
+  // it (the window-scroll guard above never touches this). Capture and
+  // restore it across every render() call this function makes.
+  const pscroll = document.querySelector('.pursuits-scroll')?.scrollTop;
+  const restorePscroll = ()=>{ if(pscroll==null) return;
+    const el = document.querySelector('.pursuits-scroll'); if(el) el.scrollTop = pscroll; };
   render();
+  restorePscroll();
   try{
     const r = await fetch(`/api/pursuits/${pursuit.id}/bid`, {
       method:'PATCH', credentials:'same-origin',
@@ -2810,6 +3124,7 @@ async function saveBid(uid, wantBid){
   }catch(e){
     BID[uid] = prev;                     // revert
     render();
+    restorePscroll();
     toast(`Could not save: ${e.message}`, true);
     return false;
   }
@@ -2859,13 +3174,31 @@ function rebuildDerived(){
   YRS.forEach(y=>{ if(!DTG[y]) DTG[y]={year:y,rev_target:0,fee_target:0,
     bp_budget:0,inv_budget:0,other_rev:0,other_fee:0}; });
 
+  // Per-user dashboard card order. Keep only keys DASH_CFG still knows
+  // about (a stored layout can outlive a removed card), preserved in the
+  // stored order, then append any card DASH_CFG has that the stored
+  // layout doesn't -- e.g. one added after this user last saved -- in
+  // the default order, so a new card never silently vanishes for an
+  // existing user. No stored layout at all (new user) is just the
+  // default order untouched.
+  const stored = D.dashboard_layout;
+  if(Array.isArray(stored) && stored.length){
+    const known = new Set(Object.keys(DASH_CFG));
+    const seen = new Set();
+    CARD_ORDER = stored.filter(k=>known.has(k) && !seen.has(k) && seen.add(k));
+    Object.keys(DASH_CFG).forEach(k=>{ if(!seen.has(k)) CARD_ORDER.push(k); });
+  } else {
+    CARD_ORDER = Object.keys(DASH_CFG);
+  }
+
   SB = null;   // sandbox is a copy of the portfolio; rebuild it
 }
 
 function numify(x){
   // psycopg returns NUMERIC as strings to preserve precision. The views do
   // arithmetic, so coerce once here rather than at every call site.
-  ['value','fee','pwin','base_pwin','blended_pwin','invpct','inv','bp','prob']
+  ['value','fee','pwin','base_pwin','blended_pwin','dependent_won_pwin',
+   'invpct','inv','bp','prob']
     .forEach(k=>{ if(x[k]!=null) x[k]=+x[k]; });
   (x.years||[]).forEach(y=>['rev','fee','bp','inv'].forEach(k=>y[k]=+y[k]||0));
   return x;
@@ -2910,7 +3243,7 @@ async function loadData(){
       stopChangePolling();
       hideChangeBanner();
       SB = null; sbSel = null; selUid = null; detailMode = false; page = 1;
-      editBuf = {}; editUid = null; REF = null;
+      editBuf = {}; editUid = null; REF = null; returnView = 'pursuits';
       targetBuf = {}; selectedTargetOrgNode = null; selectedScopeNodeId = null;
       sortKey = 'value'; sortDir = -1;
       FLT = {market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:''};

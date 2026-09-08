@@ -1030,6 +1030,54 @@ def main():
              WHERE calendar_year = %s""", (test_year5,))
         db.commit()
 
+    print("\n=== 16. dashboard layout: per-user, not per-tenant ===")
+    r = safe(A.put, "/api/dashboard-layout", json={"card_order": []})
+    check("an empty card_order is rejected",
+          r.status_code == 422, f"got {r.status_code}: {r.text[:150]}")
+
+    r = safe(A.put, "/api/dashboard-layout",
+            json={"card_order": ["outcomes", "revenue", "outcomes"]})
+    check("a card_order with duplicates is rejected",
+          r.status_code == 422, f"got {r.status_code}: {r.text[:150]}")
+
+    r = safe(A.put, "/api/dashboard-layout",
+            json={"card_order": ["outcomes", "revenue", "summary"]})
+    check("PUT as any authenticated user succeeds (no role gate -- "
+          "this is personal UI state, same category as DASH_CFG "
+          "show/hide, not a privileged action)",
+          r.status_code == 200, f"got {r.status_code}: {r.text[:150]}")
+
+    r = safe(A.get, "/api/bootstrap")
+    check("GET /api/bootstrap echoes A's own saved order back",
+          (r.json() or {}).get("dashboard_layout") ==
+          ["outcomes", "revenue", "summary"], f"got {r.text[:200]}")
+
+    r = safe(N.get, "/api/bootstrap")
+    check("a DIFFERENT user in the SAME tenant (N) is unaffected by A's "
+          "reorder -- dashboard_layout is per-user, not a tenant-wide "
+          "default",
+          (r.json() or {}).get("dashboard_layout") is None,
+          f"got {r.text[:200]}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        rows = db.execute("""
+            SELECT u.email, l.card_order FROM user_dashboard_layout l
+              JOIN app_user u ON u.id = l.user_id
+             WHERE u.email IN (%s, %s)""", (args.user_a, args.user_narrow)).fetchall()
+    by_email = {row["email"]: row["card_order"] for row in rows}
+    check("only A's row was written -- N was never given one just by "
+          "being on the same tenant",
+          by_email.get(args.user_a) == ["outcomes", "revenue", "summary"]
+          and args.user_narrow not in by_email,
+          f"got {by_email}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        db.execute("""
+            DELETE FROM user_dashboard_layout
+             WHERE user_id IN (SELECT id FROM app_user WHERE email = %s)""",
+            (args.user_a,))
+        db.commit()
+
     print(f"\n{'='*58}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
