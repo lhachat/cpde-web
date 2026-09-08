@@ -206,12 +206,14 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
                AND p.org_node_id = ANY(%s::uuid[])""",
             (p.user_id, dash_scope_ids))
 
-        # Per-user dashboard card order (see ddl/19_dashboard_layout.sql).
-        # Absent row is a perfectly normal state -- a new user, or one who
-        # has never dragged a card -- and means "use the frontend's own
-        # default order", not an error.
+        # Per-user dashboard card order AND per-card show/hide/chart-type
+        # settings (ddl/19_dashboard_layout.sql, ddl/20_dashboard_card_
+        # settings.sql -- one row, two facets). Absent row is a perfectly
+        # normal state -- a new user, or one who has never touched the
+        # config panel -- and means "use the frontend's own defaults",
+        # not an error.
         layout_row = fetch_one(cur, """
-            SELECT card_order FROM user_dashboard_layout
+            SELECT card_order, card_settings FROM user_dashboard_layout
              WHERE user_id = %s""", (p.user_id,))
 
         scope_targets = fetch_all(cur, """
@@ -375,6 +377,7 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
         # pursuit's own r.org_unit_code, no second request.
         "owner_candidates": owner_candidates,
         "dashboard_layout": layout_row["card_order"] if layout_row else None,
+        "dashboard_settings": layout_row["card_settings"] if layout_row else None,
         # Depends-on picker options -- a flat list (uid/name), not keyed
         # by org node like owner_candidates; see the note above the
         # query that builds it.

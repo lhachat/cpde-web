@@ -39,6 +39,98 @@ from .scoring import ScoringTableError, accumulate, lookup
 _SCORED_QUESTIONS = ("TM1A", "TM1B", "TM2", "TM3", "TM4", "TM5", "PP1", "P1")
 
 
+def apply_dependency_blend(cur, pursuit_id: str, predecessor_id: str) -> None:
+    """Recomputes and persists blended_pwin on this pursuit's CURRENT BASE
+    row, per the real production spreadsheet's own formula:
+
+        blended = base + (dep_won_pwin - base) * dep_factor
+
+    Confirmed exactly (to reported precision) against migrate_workbook.py's
+    own migrated historical data for real AERO/DEMO dependent pursuits --
+    e.g. pursuit 1073 (predecessor still open): base=0.199000,
+    dep_won=0.134575, dep_factor=predecessor's own live Pwin=0.119825 =>
+    blended=0.191280, matching the migrated blended_pwin exactly.
+
+    dep_factor:
+      - predecessor decided WON:  1.0 -- confirmed live: pursuit 61's
+        migrated blended_pwin equals its own DEPENDENT_WON pwin exactly.
+      - predecessor decided LOST: 0.0 -- confirmed live: pursuit 53's
+        migrated blended_pwin equals its own base_pwin exactly.
+      - predecessor still open: the predecessor's own current BASE Pwin,
+        as a live probability estimate (the source formula's XLOOKUP into
+        the predecessor's own "Pwin" column -- itself already blended if
+        the predecessor has its own dependency; no real chained case
+        exists in AERO/DEMO today to re-verify that recursive step
+        against, but it follows directly from reading the same column
+        this function itself writes).
+
+    No real CANCELLED/NO_BID predecessor has a real dependent in AERO/DEMO
+    today (confirmed live), and the source spreadsheet formula has no
+    branch for this case -- raises rather than inventing one. If this is
+    ever hit for real, it needs an actual decision, not a silent guess.
+
+    Recorded on the BASE row only (blended_pwin's own column comment).
+    pwin is set to the SAME blended value there, matching the original
+    tool's own convention (migrate_workbook.py: "the Pwin on the main
+    sheet is the BLENDED result and Base Pwin is the standalone value") --
+    every existing single-number consumer (Dashboard rollups, the
+    Pursuits list PWIN column, portfolio summaries) already reads `pwin`
+    directly and needs no separate change to pick this up. base_pwin is
+    left untouched as the standalone engine/analyst-entered value.
+
+    Called after EITHER scenario's assessment is persisted (BASE or
+    DEPENDENT_WON) for a pursuit with a dependency -- both recalc.py's
+    own persist path and bhptw.py's Black Hat/PTW submit paths -- since
+    either one can change an input this formula reads.
+    """
+    base_row = fetch_one(cur, """
+        SELECT id, base_pwin FROM pwin_assessment
+         WHERE pursuit_id = %s AND scenario = 'BASE' AND is_current""",
+        (pursuit_id,))
+    if not base_row or base_row["base_pwin"] is None:
+        return  # nothing to blend yet -- no BASE assessment exists
+
+    base = float(base_row["base_pwin"])
+
+    dep_won_row = fetch_one(cur, """
+        SELECT pwin FROM pwin_assessment
+         WHERE pursuit_id = %s AND scenario = 'DEPENDENT_WON' AND is_current""",
+        (pursuit_id,))
+    dep_win = (float(dep_won_row["pwin"])
+               if dep_won_row and dep_won_row["pwin"] is not None else base)
+
+    pred = fetch_one(cur, "SELECT outcome FROM pursuit WHERE id = %s",
+                     (predecessor_id,))
+    outcome = pred["outcome"] if pred else None
+
+    if outcome == "WON":
+        dep_factor = 1.0
+    elif outcome == "LOST":
+        dep_factor = 0.0
+    elif outcome in ("CANCELLED", "NO_BID"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This pursuit's depended-on predecessor is "
+            f"{outcome} -- the real spreadsheet formula this blend is "
+            "based on has no defined behavior for a cancelled/no-bid "
+            "predecessor (never occurred in the migrated production data "
+            "either), so this needs a real decision rather than an "
+            "invented rule. Pwin for this pursuit was not updated.")
+    else:
+        pred_row = fetch_one(cur, """
+            SELECT pwin FROM pwin_assessment
+             WHERE pursuit_id = %s AND scenario = 'BASE' AND is_current""",
+            (predecessor_id,))
+        dep_factor = (float(pred_row["pwin"])
+                      if pred_row and pred_row["pwin"] is not None else 0.0)
+
+    blended = base + (dep_win - base) * dep_factor
+
+    cur.execute("""
+        UPDATE pwin_assessment SET pwin = %s, blended_pwin = %s
+         WHERE id = %s""", (blended, blended, base_row["id"]))
+
+
 async def recalculate_pwin(cur, pursuit_id: str, user_id,
                            answers_override: dict[str, str] | None = None,
                            persist: bool = True,
@@ -185,6 +277,20 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
 
     fee = resolve_fee(cur, pu["contract_type_id"], p1_option_id)
 
+    # Derived from the pursuit's own stored P2 answer -- the SAME
+    # by_code/label() lookup every other scored question already reads
+    # from, not a second path to the same answer. Previously a hardcoded
+    # "Best Value" literal here, unconditionally, for every pursuit
+    # regardless of its real P2 -- confirmed live: 39 real LPTA pursuits
+    # (AERO+DEMO) had their Pwin computed via the engine's Best Value
+    # path (solve_dap(), tech/mgmt/pp fully counted) instead of its
+    # separate, deliberately different, verified LPTA path
+    # (dap_solver.solve_all_daps: dap = bid_price, price alone --
+    # test_lpta_dap_equals_bid_price in cda-engine's own suite). Wrong
+    # since recalculation was first built (v0.2.0, 2026-08-28) until
+    # this fix.
+    eval_type = "LPTA" if label("P2") == "LPTA" else "Best Value"
+
     # Synthetic competitor construction (the fixed 85/85/85 "Avg Co N"
     # rule, confirmed against BuildInputJson_) now happens ENGINE-SIDE:
     # sending bidders alone reproduces the exact same rule, confirmed
@@ -203,7 +309,7 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
         "fee": float(fee),
         "contract_type": pu["contract_type_code"],
         "p1_answer": p1_label,
-        "eval_type": "Best Value",
+        "eval_type": eval_type,
         "market": pu["market_code"],
         "bidders": bidder_count,
     }
@@ -297,6 +403,20 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
             VALUES (%s,%s,%s,%s,%s)""",
             (row["id"], ans_row["question_id"], option_id,
              numeric_value, boolean_value))
+
+    if pu["depends_on_pursuit_id"]:
+        apply_dependency_blend(cur, pursuit_id, pu["depends_on_pursuit_id"])
+        if scenario == "BASE":
+            # The just-inserted row IS the one blend was applied to --
+            # reflect the blended pwin in the return value too, not just
+            # the DB, so the caller's own toast/UI isn't showing the
+            # stale unblended figure for the one case where this
+            # response IS the BASE row.
+            refreshed = fetch_one(cur, """
+                SELECT pwin, blended_pwin FROM pwin_assessment WHERE id = %s""",
+                (row["id"],))
+            row["pwin"] = refreshed["pwin"]
+            row["blended_pwin"] = refreshed["blended_pwin"]
 
     row["fee"] = fee
     row["solver_message"] = result.get("solver_message", "")

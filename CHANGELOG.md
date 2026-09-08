@@ -9,6 +9,265 @@ it does.
 
 ---
 
+## [0.7.0] — 2026-09-08
+
+A correctness-focused round: a real LPTA scoring bug affecting 39
+pursuits, a matching sole-source data gap, the real `blended_pwin`
+formula built from the actual production spreadsheet, a structural fix
+to how phase reversion works, and two genuine UI gaps -- one of which
+was silently discarding real user input, not just failing to persist
+it. Every item below was verified live against the real engine, the
+real database, and (where UI-facing) real Playwright-driven interaction
+-- and every temporary test mutation was restored via the real write
+path, confirmed via audit log or direct query.
+
+### LPTA `eval_type` hardcoding — real correctness bug, fixed
+
+- `recalc.py`'s engine payload sent `"eval_type": "Best Value"` as a
+  hardcoded literal on EVERY recalculation, regardless of a pursuit's
+  real P2 (Best Value/LPTA) answer -- confirmed via `git log -S` to
+  have existed since the commit that first built real Pwin
+  recalculation (v0.2.0, 2026-08-28), roughly 11 days.
+- 39 real LPTA pursuits (37 AERO, 2 DEMO) had been scored via the
+  engine's competitive Best Value path (tech/mgmt/pp fully counted)
+  instead of its genuinely different, verified LPTA path
+  (`dap_solver.solve_all_daps`: DAP = bid price, tech/mgmt/pp excluded
+  entirely -- confirmed against `cda-engine`'s own
+  `test_lpta_dap_equals_bid_price`).
+- Fixed: `eval_type` now derives from the pursuit's own stored P2
+  answer, the same lookup every other scored question already uses.
+  `test_lpta_eval_type.py` (new, permanent) asserts the actually-
+  persisted `engine_request->>'eval_type'` for a real LPTA and a real
+  Best Value pursuit -- guards specifically against a lazy "always
+  LPTA" fix passing the same check a hardcoded "always Best Value" bug
+  did.
+- All 39 recomputed individually and live via the real `/recalculate`
+  endpoint, with before/after Pwin captured per pursuit. Most did not
+  move (mathematically expected when scores sit near the synthetic
+  baseline); exactly 4 moved for real (1108, 1139, 1146, 73) -- hand-
+  verified against the raw `engine_request`/`engine_response` for two
+  of them (1146, 73), confirming identical-price/no-differential
+  matchups correctly resolve to exactly 50% per head-to-head.
+- Pursuit 1146 ("Hollow Follow-On") crossed the app's own "Pwin ≥ 50%"
+  threshold as a direct result of the correction (0.250000 -> 0.500000)
+  -- flagged explicitly here, not buried in an aggregate count.
+- Separately confirmed empirically, not just architecturally, that
+  market differentials still correctly affect LPTA Pwin: swapping a
+  real pursuit's market (1113, GSS -> SPC and back) moved its Pwin by
+  exactly the expected magnitude (0.210175 -> 0.084625 -> 0.210175),
+  tracing the effect to `pwin_engine.py` applying the differential to
+  `client_bid_price` before `eval_type` is even parsed -- LPTA's own
+  branch only changes how the competitor's DAP is built, never whether
+  the client's own bid price carries the market adjustment.
+
+### 12 pursuits with no real BH/PTW assessment — corrected and promoted
+
+- Found during the LPTA work: 12 pursuits at Post-BH/Post-PTW stage had
+  ZERO real Black Hat or PTW submissions ever made -- their `is_current`
+  row was still QUESTIONNAIRE-type, meaning their displayed Pwin was
+  the (LPTA-bug-affected) questionnaire value the entire time, despite
+  the pipeline stage claiming a real competitive analysis had happened.
+- 3 of 12 (1038, 1047, 1050 -- still open) promoted into real BLACK_HAT/
+  PTW-type rows via the actual submit endpoints, using the exact same
+  pull-forward defaults the BH/PTW form itself computes -- indistin-
+  guishable from a real analyst submission, not a parallel INSERT.
+- 9 of 12 are closed (Won/Lost). Their QUESTIONNAIRE row's own stored
+  computation was corrected in place; deliberately left un-promoted
+  into a real BH/PTW row -- bypassing the closed-pursuit write guard
+  for a number that no longer drives any live decision was judged not
+  worth the risk, and reported for a decision rather than done
+  unilaterally.
+
+### Sole-source Pwin gap — found and fixed
+
+- 3 pursuits (1080, 1098, 1124) were marked sole-source but their
+  stored Pwin was stale -- `is_sole_source_pwin=false` despite
+  `is_sole_source=true` -- meaning the flat-95% business rule had never
+  actually been applied to them.
+- Investigated the more-direct-mechanism question before reaching for
+  an on/off toggle: `write.py`'s own sole-source check is presence-
+  based (`"is_sole_source" in fields`), not value-change-based, so
+  PATCHing `is_sole_source: true` on an ALREADY-sole-source pursuit
+  re-enters the real, already-built 95%-rule block without ever passing
+  through an invalid intermediate state. Used that directly.
+- That block itself had never touched `blended_pwin`, leaving it stale
+  even after the fix -- fixed generally (not a one-off patch for these
+  3): sole source bypasses any competitive/blend computation entirely,
+  so `blended_pwin` is now set to the same flat 0.95 whenever a pursuit
+  is confirmed sole-source.
+- All 3 confirmed live: `pwin = blended_pwin = 0.95`,
+  `is_sole_source_pwin = true`, audited and attributed correctly.
+
+### `blended_pwin` — built from the confirmed real spreadsheet formula
+
+- Sourced directly from the actual production Excel formula (given, not
+  inferred): `blended = base + (dependent_won_pwin - base) * dep_factor`,
+  where `dep_factor` is the predecessor's realized outcome as a hard
+  1/0 weight once decided, or the predecessor's own current live Pwin
+  as a probability estimate while still open.
+- The Won=1/Lost=0 mapping was confirmed against real historical
+  migration data, not assumed: pursuit 61's migrated `blended_pwin`
+  equalled its own Dependent-Won Pwin exactly (predecessor WON, factor
+  1); pursuit 53's equalled its own Base Pwin exactly (predecessor
+  LOST, factor 0).
+- Matches the original tool's own convention (`migrate_workbook.py`'s
+  comment: "the Pwin on the main sheet is the BLENDED result and Base
+  Pwin is the standalone value") -- `pwin` becomes the blended value on
+  a dependent pursuit's BASE row, picked up by every existing display
+  (Dashboard rollups, the Pursuits list, portfolio summaries) with zero
+  frontend changes; `base_pwin` stays the standalone engine value.
+- Verified against all four real formula branches (no dependency,
+  predecessor open, WON, LOST) on real pursuits, hand-checked
+  arithmetic, plus the Black Hat submit code path specifically (not
+  just `/recalculate`) via a temporary, fully-reverted promotion.
+- Cancelled/no-bid-predecessor case has no real precedent in AERO/DEMO
+  today and no branch in the source formula -- `apply_dependency_
+  blend()` raises rather than inventing behavior for it, by design.
+
+### Sole source and LPTA pursuits cannot have a dependency
+
+- New rule. The "LPTA blending is a no-op anyway" reasoning behind it
+  was confirmed empirically, not assumed: pursuit 1140 confirmed
+  tech/mgmt/pp really is irrelevant under LPTA (a 75/75/85 -> 95/95/90
+  swing left Pwin exactly unchanged), but pursuit 1139 showed a real
+  ~9-point swing (0.155200 -> 0.065278) driven by a competitor price-
+  position change (TM2/TM3, independent of tech/mgmt/pp) -- proving
+  this is a deliberate product decision, not a mathematical
+  inevitability, and reported as such rather than silently assumed.
+- 5 existing violating pursuits found (sole-source: 1080, 1098, 1124;
+  LPTA: those same 2 plus 1139, 1140) and, once explicitly approved,
+  cleared via the real PATCH write path -- not a direct SQL update.
+- The reverse transition (toggling sole-source/LPTA onto a pursuit that
+  already has a dependency) auto-clears the dependency rather than
+  blocking the unrelated toggle/answer-save -- always surfaced via an
+  explicit `dependency_cleared` response flag, never silent.
+- Clearing the 5 violations surfaced two further real gaps, both
+  approved and fixed: (1) each left an orphaned `is_current`
+  DEPENDENT_WON row with no dependency to justify it -- flipped to
+  `is_current=false` and preserved, not deleted; (2) the 3 sole-source
+  pursuits among them could not be refreshed via `/recalculate`
+  (blocked outright for sole-source), which is what surfaced the
+  sole-source Pwin gap described above.
+- UI: the Depends-on field renders as a disabled/derived control with
+  the reason in a hover tooltip for a locked pursuit, reusing this
+  app's existing pattern for other derived fields rather than inventing
+  a new one. Confirmed live for both a real sole-source and a real LPTA
+  pursuit, plus a control pursuit proving the lock is conditional.
+
+### Revert to Pre-BH — structural fix, not a patch
+
+- The original design (reactivate the old QUESTIONNAIRE row's
+  `is_current` flag) was tested directly against the real system and
+  found impossible, not merely unbuilt -- `bootstrap.py` joins purely
+  on `is_current` with no mechanism anywhere to flip it back on.
+- Redesigned: reverting a pursuit's phase to Pre-BH now triggers a
+  genuinely FRESH recalculation from its currently-saved questionnaire
+  answers -- the exact same `recalculate_pwin()` function `/recalculate`
+  itself calls -- rather than resurrecting a historical value. Both
+  scenarios recalculate (BASE, and DEPENDENT_WON if answered), so a
+  dependent pursuit's blend combines two fresh numbers, not one fresh
+  and one stale.
+- Verified this guarantees current-correct results even when scoring,
+  fee, or market logic has changed since a pursuit was last Pre-BH:
+  reverted pursuit 1038 (one of the 12 pursuits promoted this round
+  from pulled-forward defaults, not a real competitive analysis) and
+  confirmed a genuine live engine call, matching an independent
+  `/recalculate` call exactly.
+- Deliberately asymmetric: re-advancing back to Post-BH/PTW does NOT
+  auto-resurrect the old BH/PTW row -- a real analyst re-submission is
+  the actual required action, and mechanically resurrecting a prior row
+  here would be the same anti-pattern just removed in the other
+  direction. Confirmed intentional, not a gap.
+- Verified against pursuit 1073, deliberately "poisoned" with a wrong
+  Black Hat value (0.5, yielding a stale blend of 0.456213) before
+  reverting -- confirmed the stale value was fully discarded, with a
+  fresh `base_pwin=0.199000` and a correctly re-blended
+  `blended_pwin=0.191280`, not a leaked or partially-stale result.
+
+### Questionnaire answers were being silently discarded on Recalculate
+
+- Worse than the original bug report (a mandatory extra Save step):
+  reproduced live against the actual pre-fix code that clicking
+  Recalculate Pwin with a pending answer change sent NO save request at
+  all, then silently reverted the on-screen change and cleared the
+  dirty indicator on its own next render -- discarding real user input
+  with no error and no indication anything was lost.
+- Fixed: questionnaire answers no longer share the Opportunity save bar
+  at all -- a local, non-blocking dirty indicator (the existing
+  per-question highlight, reused not reinvented) shows instead.
+  Recalculate now persists any pending answers first, aborting before
+  computation if that save fails, then computes -- one click.
+- Verified live end to end on a real pursuit: a real answer change
+  moved Pwin 10% -> 3% in one Recalculate click, confirmed genuinely
+  written to the database (not an in-memory-only computation) via a
+  full page reload, then reverted the same one-click way back to 10%.
+
+### Dashboard per-card settings — confirmed genuinely unpersisted, now fixed
+
+- Show/hide and chart-type settings were pure client-side, in-memory
+  state despite the config panel's own on-screen copy already claiming
+  otherwise -- confirmed via code inspection that only card ORDER had
+  ever actually been wired to a save call; the checkboxes/selects
+  mutated local state and re-rendered, and "Done" just closed the
+  panel.
+- Extended the existing `user_dashboard_layout` table (a sibling
+  `card_settings` JSONB column, `ddl/20_dashboard_card_settings.sql`)
+  rather than building a second persistence mechanism -- one PUT, one
+  audit trail, same per-user row card order already used.
+- Verified live, both per-user and cross-tenant: changed a real user's
+  show/hide and chart-type settings, confirmed they applied instantly
+  with no separate save step and survived a hard reload, then logged in
+  as a different tenant's admin and confirmed their dashboard showed
+  clean, completely unaffected defaults.
+
+### Test suite growth
+
+| Suite | Assertions | Result |
+|---|---|---|
+| `test_isolation.py` — tenant isolation (RLS) | 29 | pass |
+| `test_scope.py` — business-unit scope | 14 | pass |
+| `test_integrity.py` — data integrity | 44 | pass (1 warning, non-fatal, unchanged since v0.2.0) |
+| `test_market_sync.py` — market sync job | 19 | pass |
+| `test_recalc_response_handling.py` — engine response-shape discipline | 3 | pass |
+| `test_scoring_migration.py` — live scoring-table migration | 10 | pass |
+| `test_fee_competitor_migration.py` — fee/competitor migration | 8 | pass |
+| `test_questionnaire_migration.py` — live questionnaire migration | 10 | pass |
+| `test_api_security.py` — API-layer security | 127 | pass |
+| `test_pursuit_owner.py` — Owner/POC field | 14 | pass |
+| `test_pursuit_dependency.py` — Depends-on field | 18 | pass |
+| `test_staffing_escalation.py` — staffing escalation model | 14 | pass |
+| `test_questionnaire_answers.py` — answer save path + recalculation | 37 | pass |
+| `test_lpta_eval_type.py` — LPTA `eval_type` derivation (new) | 6 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_blended_pwin.py` — dependency-blend math (new) | 21 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_dependency_restrictions.py` — sole-source/LPTA dependency block (new) | 6 | pass |
+| `test_revert_to_pre_bh.py` — revert-to-Pre-BH fresh recalculation (new) | 11 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_bhptw_phase_change.py` — Black Hat/PTW phase change | 11 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_engine_client.py` — real AWS/SSM + live engine verification | 10 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_tm1a_tm1b_tm2_cascade.py` — cascade fix re-verification | 4 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+
+**416 assertions passing across twenty suites** (up from 367 across
+sixteen at v0.6.0).
+
+### Known gaps
+
+- SSO/SCIM/licensing/admin delegation UI (backlog 3h) -- on hold.
+- Self-service user management -- still SQL-only.
+- Duplicate pursuit detection (backlog 3d) -- not started.
+- The Salesforce plugin's own migration to the engine-served
+  scoring/fee/questionnaire spec -- separate repo, status not recently
+  confirmed.
+- The 9 closed, Post-BH/PTW pursuits with a corrected-in-place but
+  never-promoted QUESTIONNAIRE row (see above) remain unpromoted --
+  still a real, open decision.
+- A cancelled/no-bid predecessor with a real dependent has never
+  occurred in AERO/DEMO and has no real formula behavior to match --
+  `apply_dependency_blend()` raises rather than inventing one if this
+  is ever hit for real.
+- DASH_CFG's per-widget filters (mentioned in the config panel's own
+  copy as future scope) are still not wired -- unchanged since v0.6.0.
+
+---
+
 ## [0.6.0] — 2026-09-08
 
 A run of pursuit-detail work: dependency handling went from a display

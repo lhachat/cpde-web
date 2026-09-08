@@ -1071,6 +1071,46 @@ def main():
           and args.user_narrow not in by_email,
           f"got {by_email}")
 
+    print("\n=== 16b. dashboard card_settings (show/hide, chart-type): "
+          "same row, same per-user story, previously not persisted at "
+          "all -- known gap since v0.6.0 ===")
+    settings_a = {"outcomes": {"on": False, "type": "table"},
+                  "revenue": {"on": True, "type": "bar"}}
+    r = safe(A.put, "/api/dashboard-layout",
+            json={"card_order": ["outcomes", "revenue", "summary"],
+                  "card_settings": settings_a})
+    check("PUT with card_settings alongside card_order succeeds",
+          r.status_code == 200, f"got {r.status_code}: {r.text[:150]}")
+
+    r = safe(A.get, "/api/bootstrap")
+    check("GET /api/bootstrap echoes A's own saved card_settings back",
+          (r.json() or {}).get("dashboard_settings") == settings_a,
+          f"got {r.text[:200]}")
+
+    r = safe(N.get, "/api/bootstrap")
+    check("a DIFFERENT user in the SAME tenant (N) is unaffected by A's "
+          "card_settings -- per-user, not a tenant-wide default, same "
+          "as card_order",
+          (r.json() or {}).get("dashboard_settings") is None,
+          f"got {r.text[:200]}")
+
+    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+        rows = db.execute("""
+            SELECT u.email, l.card_settings FROM user_dashboard_layout l
+              JOIN app_user u ON u.id = l.user_id
+             WHERE u.email IN (%s, %s)""", (args.user_a, args.user_narrow)).fetchall()
+    settings_by_email = {row["email"]: row["card_settings"] for row in rows}
+    check("only A's row carries card_settings -- N was never given one",
+          settings_by_email.get(args.user_a) == settings_a
+          and args.user_narrow not in settings_by_email,
+          f"got {settings_by_email}")
+
+    r = safe(A.put, "/api/dashboard-layout",
+            json={"card_order": ["outcomes"],
+                  "card_settings": {"x": {"on": "not-a-bool", "type": "bar"}}})
+    check("a non-boolean 'on' in card_settings is rejected",
+          r.status_code == 422, f"got {r.status_code}: {r.text[:150]}")
+
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         db.execute("""
             DELETE FROM user_dashboard_layout

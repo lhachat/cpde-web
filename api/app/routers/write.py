@@ -212,6 +212,7 @@ async def patch_pursuit(
             SELECT p.id, p.is_sole_source, p.bidders, p.org_node_id,
                    p.bp_start_date, p.proposal_due_date,
                    p.contract_award_date, p.period_end_date, p.outcome,
+                   p.depends_on_pursuit_id,
                    p.updated_at, u.email AS updated_by_email, ps.code AS stage_code
               FROM pursuit p
               LEFT JOIN app_user u ON u.id = p.updated_by
@@ -319,6 +320,41 @@ async def patch_pursuit(
                     cur, target_node_id, owner_user_id)
             columns["owner_user_id"] = "owner_user_id"
 
+        # Sole source and a dependency are mutually exclusive: sole source
+        # bypasses the engine entirely (flat 95% rule), so there is no
+        # real base/dependent-won computation to blend. Checked against
+        # `merged` (this same request's pending value), not just the
+        # row's current one -- a single PATCH setting is_sole_source AND
+        # a dependency together is still caught, not just the two-step
+        # version. LPTA's own equivalent check lives inside
+        # resolve_pursuit_dependency (P2 isn't a `pursuit` column, so it
+        # isn't part of `merged`).
+        if depends_on_set and depends_on_opp_id is not None and merged["is_sole_source"]:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "a sole source pursuit cannot have a dependency")
+
+        # The reverse transition: a pursuit that ALREADY has a real
+        # dependency is now being turned sole-source (this field wasn't
+        # itself part of the PATCH, so leaving it alone would create a
+        # new invalid combination rather than merely fail to fix an old
+        # one -- different from the historical violations found this
+        # round, which are left untouched pending an explicit decision).
+        # Recommendation: auto-clear rather than block the toggle --
+        # blocking would force the caller to undo an unrelated field
+        # (the dependency) before they could do what they actually
+        # asked for (turn on sole source), for a combination that is
+        # never meaningful. Surfaced in the response
+        # (dependency_cleared), never silent -- same discipline as the
+        # sole-source Pwin side effect just below.
+        dependency_cleared = False
+        if (not depends_on_set and "is_sole_source" in fields
+                and fields["is_sole_source"] and not exists["is_sole_source"]
+                and exists["depends_on_pursuit_id"] is not None):
+            fields["depends_on_pursuit_id"] = None
+            columns["depends_on_pursuit_id"] = "depends_on_pursuit_id"
+            dependency_cleared = True
+
         if depends_on_set:
             if depends_on_opp_id is None:
                 fields["depends_on_pursuit_id"] = None
@@ -347,6 +383,7 @@ async def patch_pursuit(
                    p.contract_award_date, p.period_end_date,
                    p.updated_at""", tuple(params))
         row["updated_by_email"] = p.email
+        row["dependency_cleared"] = dependency_cleared
 
         # ------------------------------------------------------------
         # Sole source Pwin: a REAL, persisted assessment, not a display
@@ -357,6 +394,7 @@ async def patch_pursuit(
         # ------------------------------------------------------------
         sole_changed = "is_sole_source" in fields
         pwin_needs_recalc = False
+        base_recalc_done = False
 
         if sole_changed and row["is_sole_source"]:
             # Turned ON: 95% is a business rule, not a computed value --
@@ -364,9 +402,23 @@ async def patch_pursuit(
             # the CURRENT BASE assessment if one exists; otherwise this
             # pursuit has never been assessed at all, and sole source alone
             # is enough to establish one.
+            #
+            # blended_pwin is set to the SAME 0.95 here too -- found stale
+            # (still showing an old competitive blend against a dependency
+            # this pursuit no longer has, since a dependency is disallowed
+            # entirely for a sole-source pursuit) on 3 real pursuits whose
+            # dependency had just been cleared. Sole source bypasses any
+            # competitive/blend computation entirely, so there is nothing
+            # for blended_pwin to mean here other than the same flat 0.95
+            # every other single-number consumer already reads as `pwin`.
+            # This is a general fix, not a one-off patch for those 3 --
+            # idempotent on an ALREADY-sole-source pursuit too (PATCHing
+            # is_sole_source: true again re-applies this block, the real,
+            # already-built mechanism for correcting a sole-source
+            # pursuit's Pwin, rather than an off/on toggle side effect).
             cur.execute("""
                 UPDATE pwin_assessment
-                   SET pwin = 0.95, is_sole_source_pwin = TRUE,
+                   SET pwin = 0.95, blended_pwin = 0.95, is_sole_source_pwin = TRUE,
                        calculated_at = now(), calculated_by = %s
                  WHERE pursuit_id = %s AND scenario = 'BASE' AND is_current""",
                 (p.user_id, pursuit_id))
@@ -376,12 +428,13 @@ async def patch_pursuit(
                 cur.execute("""
                     INSERT INTO pwin_assessment
                         (pursuit_id, questionnaire_version_id, scenario,
-                         assessment_type, engine_version, pwin,
+                         assessment_type, engine_version, pwin, blended_pwin,
                          is_sole_source_pwin, calculated_by, is_current)
                     VALUES (%s,%s,'BASE','QUESTIONNAIRE','sole-source-rule',
-                            0.95, TRUE, %s, TRUE)""",
+                            0.95, 0.95, TRUE, %s, TRUE)""",
                     (pursuit_id, qv["id"] if qv else None, p.user_id))
             row["pwin"] = 0.95
+            row["blended_pwin"] = 0.95
 
         elif sole_changed and not row["is_sole_source"]:
             # Turned OFF: this pursuit is competitive again. Try the real
@@ -400,10 +453,77 @@ async def patch_pursuit(
                 try:
                     recalced = await recalculate_pwin(cur, pursuit_id, p.user_id)
                     row["pwin"] = recalced["pwin"]
+                    base_recalc_done = True
                 except HTTPException as exc:
                     pwin_needs_recalc = True
                     row["pwin"] = stale["pwin"]   # still 0.95 until recalculated
                     row["pwin_recalc_error"] = (
+                        exc.detail if isinstance(exc.detail, str)
+                        else str(exc.detail))
+
+        # ------------------------------------------------------------
+        # Phase revert to Pre-BH: recalculate fresh from the pursuit's
+        # CURRENTLY-SAVED questionnaire answers, exactly the same
+        # computation /recalculate itself uses -- not a resurrection of
+        # the old QUESTIONNAIRE row's is_current flag. Confirmed live,
+        # earlier this session, that bootstrap.py joins purely on
+        # is_current with no mechanism to flip it back on -- reactivating
+        # a historical row was never actually possible; there was
+        # nothing to remove here, only something to build.
+        #
+        # Deliberately NOT a resurrection even though one might seem
+        # simpler: market differentials, fee rates and the scoring table
+        # have each been corrected at least once this session, so a
+        # fresh recalculation reflects CURRENT correct logic. For one of
+        # the 12 pursuits promoted earlier this session, the CURRENT
+        # BH/PTW row is itself a Pwin built from pulled-forward defaults,
+        # not a real competitive analysis -- reverting one of those must
+        # produce a genuinely fresh number, not restore that value.
+        #
+        # recalculate_pwin's own persist-path guard checks the pursuit's
+        # stage via its OWN fresh SELECT, which will already see PRE_BH
+        # (the UPDATE above already committed it within this same
+        # transaction) -- no special-casing needed to get past that
+        # guard. Its own is_current-flip (scenario='BASE', 'DEPENDENT_
+        # WON') correctly demotes whatever BLACK_HAT/PTW row was current,
+        # preserved not deleted, same as every other assessment history
+        # record.
+        #
+        # Both scenarios, not just BASE: leaving DEPENDENT_WON at its old
+        # (possibly BH/PTW-entered) value would mean apply_dependency_
+        # blend() blends one fresh number against one stale one -- not
+        # genuinely fresh either. Only attempted if a DEPENDENT_WON
+        # QUESTIONNAIRE assessment actually exists (a dependent pursuit
+        # that never had its DEPENDENT_WON scenario answered has nothing
+        # to recalculate there -- a real, valid state, not an error).
+        #
+        # Failures are non-fatal, same pattern as sole-source-turned-off
+        # just above: the phase change itself must not fail just because
+        # a fresh recalculation couldn't complete right now.
+        reverted_to_pre_bh = (refs.get("pipeline_stage_code") == "PRE_BH"
+                              and exists["stage_code"] != "PRE_BH")
+        if reverted_to_pre_bh and not base_recalc_done:
+            try:
+                recalced = await recalculate_pwin(cur, pursuit_id, p.user_id)
+                row["pwin"] = recalced["pwin"]
+            except HTTPException as exc:
+                pwin_needs_recalc = True
+                row["pwin_recalc_error"] = (
+                    exc.detail if isinstance(exc.detail, str)
+                    else str(exc.detail))
+
+            has_dep_won = fetch_one(cur, """
+                SELECT 1 FROM pwin_assessment
+                 WHERE pursuit_id = %s AND scenario = 'DEPENDENT_WON'
+                   AND assessment_type = 'QUESTIONNAIRE' LIMIT 1""",
+                (pursuit_id,))
+            if has_dep_won:
+                try:
+                    await recalculate_pwin(cur, pursuit_id, p.user_id,
+                                           scenario="DEPENDENT_WON")
+                except HTTPException as exc:
+                    pwin_needs_recalc = True
+                    row["dependent_won_recalc_error"] = (
                         exc.detail if isinstance(exc.detail, str)
                         else str(exc.detail))
 
@@ -767,8 +887,22 @@ async def audit(
              LIMIT %s""", tuple(params) + (min(limit, 500),))
 
 
+class CardSettingIn(BaseModel):
+    # Opaque-ish, like the card ids themselves (see DashboardLayoutIn's
+    # own note) -- `on`/`type` are DASH_CFG's own field names, not
+    # re-validated against a fixed type list here, so a new chart type
+    # needs no matching migration either.
+    on: bool
+    type: str = Field(min_length=1, max_length=20)
+
+
 class DashboardLayoutIn(BaseModel):
     card_order: list[str] = Field(..., min_length=1, max_length=40)
+    # Per-card show/hide and chart-type settings (ddl/20_dashboard_
+    # card_settings.sql) -- optional and defaults to empty so an older
+    # caller sending card_order alone still works unchanged. Keyed by
+    # the same opaque card id card_order uses.
+    card_settings: dict[str, CardSettingIn] = Field(default_factory=dict)
 
     @field_validator("card_order")
     @classmethod
@@ -779,31 +913,45 @@ class DashboardLayoutIn(BaseModel):
             raise ValueError("card_order entries must be short strings")
         return v
 
+    @field_validator("card_settings")
+    @classmethod
+    def _settings_sane(cls, v):
+        if len(v) > 40:
+            raise ValueError("card_settings cannot have more than 40 entries")
+        if any(not (1 <= len(k) <= 40) for k in v):
+            raise ValueError("card_settings keys must be short strings")
+        return v
+
 
 @router.put("/dashboard-layout")
 async def set_dashboard_layout(
     body: DashboardLayoutIn,
     p: Principal = Depends(current_principal),
 ):
-    """Per-user dashboard card order (ddl/19_dashboard_layout.sql). Any
-    authenticated user may set their own -- this is personal UI state,
-    the same category as which cards DASH_CFG shows or hides
-    client-side, not a privileged action requiring a role check.
+    """Per-user dashboard card order AND per-card settings (ddl/19_
+    dashboard_layout.sql, ddl/20_dashboard_card_settings.sql -- one
+    table, one preference row, not two mechanisms). Any authenticated
+    user may set their own -- this is personal UI state, not a
+    privileged action requiring a role check.
 
-    Card identifiers are opaque strings from the frontend's own
-    DASH_CFG keys. Deliberately not validated against a fixed set here:
-    a card added to DASH_CFG later needs no matching migration, and a
-    stale key from a since-removed card is harmless -- the frontend
-    already filters CARD_ORDER down to keys it currently knows about.
+    Card identifiers (and, for card_settings, the `type` value) are
+    opaque strings from the frontend's own DASH_CFG. Deliberately not
+    validated against a fixed set here: a card added to DASH_CFG later
+    needs no matching migration, and a stale key from a since-removed
+    card is harmless -- the frontend already filters both CARD_ORDER
+    and DASH_CFG down to keys it currently knows about.
     """
+    settings_json = {k: v.model_dump() for k, v in body.card_settings.items()}
     with tenant_tx(p.client_id, p.user_id) as cur:
         cur.execute("""
-            INSERT INTO user_dashboard_layout (user_id, card_order)
-            VALUES (%s, %s)
+            INSERT INTO user_dashboard_layout (user_id, card_order, card_settings)
+            VALUES (%s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE
-               SET card_order = EXCLUDED.card_order, updated_at = now()""",
-            (p.user_id, Json(body.card_order)))
-    return {"card_order": body.card_order}
+               SET card_order = EXCLUDED.card_order,
+                   card_settings = EXCLUDED.card_settings,
+                   updated_at = now()""",
+            (p.user_id, Json(body.card_order), Json(settings_json)))
+    return {"card_order": body.card_order, "card_settings": settings_json}
 
 
 # ---------------------------------------------------------------------
@@ -1070,4 +1218,27 @@ async def set_questionnaire_answers(
                     DO UPDATE SET question_option_id = EXCLUDED.question_option_id""",
                     (assessment["id"], question_id, option_id))
 
-    return {"scenario": body.scenario, "answers": body.answers}
+        # An LPTA pursuit cannot have a dependency (see
+        # plan_scope.resolve_pursuit_dependency's own note on why --
+        # confirmed live that Dependent-Won CAN differ meaningfully from
+        # Base under LPTA, so this is a deliberate product decision, not
+        # a "blending is inert anyway" one). This is the OTHER way a
+        # pursuit can become LPTA: answering P2 here, on a pursuit that
+        # already has a real dependency set. Same recommendation and
+        # reasoning as the sole-source transition in the main PATCH
+        # endpoint -- auto-clear rather than block the answer save
+        # (blocking would force undoing an unrelated field, the
+        # dependency, before the analyst could save the answer they
+        # actually came here to save), surfaced in the response, never
+        # silent.
+        dependency_cleared = False
+        if (body.scenario == "BASE" and merged.get("P2") == "LPTA"
+                and pu["depends_on_pursuit_id"] is not None):
+            cur.execute("""
+                UPDATE pursuit SET depends_on_pursuit_id = NULL,
+                       updated_at = now(), updated_by = %s
+                 WHERE id = %s""", (p.user_id, pursuit_id))
+            dependency_cleared = True
+
+    return {"scenario": body.scenario, "answers": body.answers,
+            "dependency_cleared": dependency_cleared}

@@ -860,10 +860,18 @@ function vDash(){
       <div class="s">${OPEN.filter(x=>isBid(x.uid)).length} open &middot; ${DECIDED.filter(x=>x.outcome!=='Canceled').length} closed counted</div></div>
   </div>
   <div class="grid dcards" id="dcards">${cardsHtml}</div>`;
-  $$('#dash [data-cfg]').forEach(c=>c.onchange=e=>{DASH_CFG[e.target.dataset.cfg].on=e.target.checked;vDash();});
-  $$('#dash [data-cfgt]').forEach(s=>s.onchange=e=>{DASH_CFG[e.target.dataset.cfgt].type=e.target.value;vDash();});
+  // Same persist-then-render order drag-reorder already uses just below
+  // (mutate, saveDashboardLayout(), vDash()) -- show/hide and chart-type
+  // used to be DASH_CFG-only, in-memory, reset every session; now every
+  // change is saved immediately, the same per-user row card order
+  // already had (ddl/20_dashboard_card_settings.sql).
+  $$('#dash [data-cfg]').forEach(c=>c.onchange=e=>{
+    DASH_CFG[e.target.dataset.cfg].on=e.target.checked; saveDashboardLayout(); vDash();});
+  $$('#dash [data-cfgt]').forEach(s=>s.onchange=e=>{
+    DASH_CFG[e.target.dataset.cfgt].type=e.target.value; saveDashboardLayout(); vDash();});
   const cd=$('#cfgDone'); if(cd) cd.onclick=()=>{cfgOpen=false;vDash();};
-  const cr=$('#cfgReset'); if(cr) cr.onclick=()=>{Object.keys(DASH_CFG).forEach(k=>DASH_CFG[k].on=true);vDash();};
+  const cr=$('#cfgReset'); if(cr) cr.onclick=()=>{
+    Object.keys(DASH_CFG).forEach(k=>DASH_CFG[k].on=true); saveDashboardLayout(); vDash();};
   wireDashDrag();
 }
 
@@ -907,17 +915,28 @@ function wireDashDrag(){
   });
 }
 async function saveDashboardLayout(){
+  // Card order AND per-card show/hide/chart-type settings, together,
+  // every call -- one PUT, one preference row (ddl/19_dashboard_
+  // layout.sql, ddl/20_dashboard_card_settings.sql), not two save
+  // paths. Built fresh from DASH_CFG every time rather than tracked as
+  // a separate diff, so this stays a full, consistent snapshot -- the
+  // same "always send the whole thing" shape CARD_ORDER itself already
+  // used before card_settings existed.
+  const card_settings = {};
+  Object.keys(DASH_CFG).forEach(k=>{
+    card_settings[k] = {on: !!DASH_CFG[k].on, type: DASH_CFG[k].type};
+  });
   try{
     const r=await fetch('/api/dashboard-layout',{method:'PUT',credentials:'same-origin',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({card_order:CARD_ORDER})});
+      body:JSON.stringify({card_order:CARD_ORDER, card_settings})});
     if(r.status===401){ showLogin(); return; }
     if(!r.ok) throw new Error(`save failed (${r.status})`);
   }catch(e){
-    // The visual reorder already happened (CARD_ORDER + vDash() ran
-    // before this call); a failed save just means it won't survive a
-    // reload, worth telling the user rather than failing silently.
-    toast(`Could not save dashboard layout: ${e.message}`, true);
+    // The visual change already happened (DASH_CFG/CARD_ORDER + vDash()
+    // ran before this call); a failed save just means it won't survive
+    // a reload, worth telling the user rather than failing silently.
+    toast(`Could not save dashboard settings: ${e.message}`, true);
   }
 }
 
@@ -1408,6 +1427,26 @@ function detailView(uid){
       ${fieldRow({...r, dependsOn:r.dep},'dependsOn','Depends on',
         {type:'select', blank:true,
          options: dependencyOptionsFor(r).map(c=>({code:c.uid, label:`${c.name} (ID ${c.uid})`})),
+         // Sole source and LPTA pursuits cannot have a dependency at all
+         // (server-side: resolve_pursuit_dependency /
+         // set_questionnaire_answers) -- there is either no competitive
+         // assessment to blend against (sole source) or the combination
+         // is disallowed as a deliberate product decision (LPTA). Locked
+         // client-side too, same disabled-with-reason pattern as every
+         // other derived field, so the picker doesn't invite a request
+         // the server will only reject after a round trip.
+         lockedWhy: r.sole
+           ? 'Sole source pursuits have no competitive assessment to blend against.'
+           : (r.answers||{})['P 2']==='LPTA'
+             ? 'LPTA pursuits cannot have a dependency.'
+             : null,
+         // Only reached via the locked/derived render branch (the normal
+         // editable <select> path never consults opts.fmt) -- without
+         // it, a pursuit locked here WHILE already having a real
+         // dependency (one of this round's found violations) would show
+         // the raw opportunity id instead of a name, unlike every other
+         // place a dependency is displayed.
+         fmt: v => v ? `${oppName(v)} (ID ${oppRef(v)})` : '\u2014',
          note:'If the pursuit chosen here is later won, this one gets a Pwin lift -- see the scenario badge on the Pwin assessment below. Only your own open pursuits are offered.'})}
       ${DEPENDENTS[r.uid]?`<div class="fr derived"><label>Depended on by</label>
         <div class="fv">${DEPENDENTS[r.uid].map(v=>`${oppName(v)} (ID ${oppRef(v)})`).join(', ')}</div></div>`:''}
@@ -1454,10 +1493,7 @@ function detailView(uid){
          ${closed?'disabled':''} style="max-width:100px"></div></div>`}
     <div class="pad" style="border-top:1px solid var(--line);display:flex;gap:8px;align-items:center">
       <button class="btn" id="dCalc" ${closed||r.sole||(r.stage&&r.stage!=='Pre-BH')?'disabled':''}>Recalculate Pwin</button>
-      <span style="font-size:11px;color:#888;margin-left:auto">${
-        r.sole ? 'Sole source uses the 95% business rule, not the engine'
-        : (r.stage&&r.stage!=='Pre-BH') ? 'Past Pre-BH \u2014 use the Black Hat or PTW form above'
-        : 'Sends tech/mgmt/pp/price/fee \u2014 the tournament solve stays server-side'}</span></div>
+      <span id="dCalcNote" style="font-size:11px;color:#888;margin-left:auto">${calcNote(r)}</span></div>
    </div>
   </div>
 
@@ -1508,20 +1544,28 @@ function detailView(uid){
   // that assumption is what broke this before.
   const refreshEditBar = ()=>{
     const slot = $('#editBarSlot');
-    // ONE combined count, ONE bar, covering both buffers -- editBuf
-    // (pursuit fields) and qBuf (questionnaire answers). They save
-    // through two different endpoints (see saveEdits()) but that is an
-    // implementation detail; from the save-bar's own point of view this
-    // is "how many things are unsaved right now".
-    const n = Object.keys(editBuf).length + Object.keys(qBuf).length;
+    // editBuf (pursuit fields) ONLY. qBuf (questionnaire answers) used
+    // to feed this same shared bar/count -- which meant changing a
+    // questionnaire answer required an explicit Save click here before
+    // Recalculate would ever see it. qBuf now has its own resolution
+    // path entirely: a local per-question dirty highlight (.q.dirty,
+    // set by the select's own onchange below) plus a note next to the
+    // Recalculate button (see calcNote()) -- Recalculate itself
+    // persists qBuf and computes in one click (see recalculatePwin()).
+    const n = Object.keys(editBuf).length;
     if(!slot) return;
     slot.innerHTML = n ? editBar(n) : '';
     if(n){
       $('#edSave').onclick = ()=>saveEdits(uid);
-      $('#edCancel').onclick = ()=>{editBuf={};qBuf={};detailView(uid);};
+      // Discards only editBuf -- a pending questionnaire answer change
+      // is qBuf's own concern (Recalculate applies it, switching
+      // scenario or leaving the page confirms discarding it), not
+      // something an unrelated pursuit-field Cancel should silently
+      // wipe out too.
+      $('#edCancel').onclick = ()=>{editBuf={};detailView(uid);};
     }
   };
-  refreshEditBar();   // reflect editBuf/qBuf immediately on every (re)draw
+  refreshEditBar();   // reflect editBuf immediately on every (re)draw
 
   $$('#pursuits [data-ed]').forEach(el=>{
     el.disabled = closed;
@@ -1576,7 +1620,11 @@ function detailView(uid){
     const code = e.target.dataset.a.replace(/\s+/g,'').toUpperCase();
     qBuf[code] = e.target.value;
     e.target.closest('.q').classList.add('dirty');
-    refreshEditBar();
+    // No shared save bar for this any more (see refreshEditBar's own
+    // comment) -- the per-question .dirty highlight above IS the local,
+    // non-blocking indicator, plus this note by the Recalculate button
+    // itself, the one place qBuf actually gets persisted now.
+    const note = $('#dCalcNote'); if(note) note.textContent = calcNote(r);
   });
   const switchScenario=s=>{
     if(Object.keys(qBuf).length &&
@@ -1592,6 +1640,19 @@ function detailView(uid){
 }
 /* openQ removed. The questionnaire now lives inside the pursuit detail
    view; #qform no longer exists, so this could only ever throw. */
+
+// The Recalculate button's own note, right of the button -- reflects
+// qBuf's dirty state too, since Recalculate is now the one place a
+// pending questionnaire answer change actually gets persisted (see
+// recalculatePwin()). Recomputed on every render AND on every
+// questionnaire select's onchange, so the note never goes stale
+// between full re-renders.
+function calcNote(r){
+  if(r.sole) return 'Sole source uses the 95% business rule, not the engine';
+  if(r.stage && r.stage!=='Pre-BH') return 'Past Pre-BH \u2014 use the Black Hat or PTW form above';
+  if(Object.keys(qBuf).length) return 'Unsaved answer changes \u2014 Recalculate will save and apply them';
+  return 'Sends tech/mgmt/pp/price/fee \u2014 the tournament solve stays server-side';
+}
 
 /* ---------- Recalculate Pwin (Pre-BH questionnaire path only) ----------
    NEVER used by Black Hat/PTW -- that path is analyst-entered and never
@@ -1609,6 +1670,29 @@ async function recalculatePwin(uid){
   const btn = document.getElementById('dCalc');
   if(btn){ btn.disabled = true; btn.textContent = 'Recalculating\u2026'; }
   try{
+    // Persist any pending questionnaire answer changes FIRST, in this
+    // SAME click -- previously these could only reach the server via
+    // the shared Opportunity save bar, requiring a separate explicit
+    // Save before Recalculate would ever see the new answer (qBuf no
+    // longer feeds that bar at all -- see refreshEditBar's own
+    // comment). If this fails, Recalculate itself is aborted rather
+    // than silently computing against the OLD, still-stored answer.
+    if(Object.keys(qBuf).length){
+      const ares = await fetch(`/api/pursuits/${r.id}/answers`, {
+        method:'PATCH', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({scenario, answers: qBuf})});
+      if(ares.status===401){ showLogin(); return; }
+      if(!ares.ok){
+        const abody = await ares.json().catch(()=>({}));
+        const msg = typeof abody.detail==='string' ? abody.detail
+                  : (abody.detail && abody.detail[0] && abody.detail[0].msg)
+                    || `saving answers failed (${ares.status})`;
+        toast(msg, true);
+        return;
+      }
+      qBuf = {};
+    }
     const res = await fetch(`/api/pursuits/${r.id}/recalculate`, {
       method:'POST', credentials:'same-origin',
       headers:{'Content-Type':'application/json'},
@@ -2704,7 +2788,7 @@ function fieldRow(r, key, label, opts){
   // forceEditable lets a call site opt a normally-always-derived field
   // out of the lock for a specific row, rather than DERIVED_WHY being a
   // blanket, unconditional rule for every field it names.
-  const why = opts.forceEditable ? null : DERIVED_WHY[key];
+  const why = opts.forceEditable ? null : (opts.lockedWhy || DERIVED_WHY[key]);
   if(why){
     return `<div class="fr derived"><label>${label}</label>
       <div class="fv">${opts.fmt ? opts.fmt(val) : (val ?? '\u2014')}
@@ -2752,64 +2836,44 @@ function editBar(n){
 async function saveEdits(uid){
   const r = P.find(x=>x.uid===uid);
   const hasFields = Object.keys(editBuf).length;
-  const hasAnswers = Object.keys(qBuf).length;
-  if(!r || (!hasFields && !hasAnswers)) return;
+  if(!r || !hasFields) return;
 
-  // Two different endpoints (questionnaire answers were never real
-  // pursuit fields -- see qBuf's own comment), one Save click. Pursuit
-  // fields first, then answers; each buffer clears only once ITS OWN
-  // call succeeds, so a failure in one leaves the other's already-saved
-  // state alone rather than re-prompting to re-save something that
-  // already landed.
+  // Pursuit fields ONLY -- questionnaire answers (qBuf) are no longer
+  // this button's concern at all. They used to share this one Save
+  // click with pursuit fields (two different endpoints, one bar), which
+  // meant changing a questionnaire answer required this same explicit
+  // Save before Recalculate would ever see it. qBuf is now persisted
+  // exclusively by Recalculate itself (recalculatePwin()), in the same
+  // click that computes the new Pwin.
   let pwinNeedsRecalc = false, staleSolePwin = null;
-  if(hasFields){
-    const payload = {expected_updated_at: r.updated_at, ...editBuf};
-    try{
-      const res = await fetch(`/api/pursuits/${r.id}`, {
-        method:'PATCH', credentials:'same-origin',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(payload)});
-      if(res.status===401){ showLogin(); return; }
-      const body = await res.json().catch(()=>({}));
-      if(res.status===409){
-        const d = body.detail || {};
-        if(d.error==='modified'){
-          toast(`${d.message} Changed by ${d.changed_by||'someone else'}. `
-                + `Reload to see their version.`, true);
-          return;
-        }
-        toast(typeof d==='string'?d:(d.message||'Conflict'), true);
+  const payload = {expected_updated_at: r.updated_at, ...editBuf};
+  try{
+    const res = await fetch(`/api/pursuits/${r.id}`, {
+      method:'PATCH', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)});
+    if(res.status===401){ showLogin(); return; }
+    const body = await res.json().catch(()=>({}));
+    if(res.status===409){
+      const d = body.detail || {};
+      if(d.error==='modified'){
+        toast(`${d.message} Changed by ${d.changed_by||'someone else'}. `
+              + `Reload to see their version.`, true);
         return;
       }
-      if(!res.ok){
-        const msg = typeof body.detail==='string' ? body.detail
-                  : (body.detail && body.detail[0] && body.detail[0].msg)
-                    || `save failed (${res.status})`;
-        toast(msg, true); return;
-      }
-      editBuf = {};
-      pwinNeedsRecalc = !!body.pwin_needs_recalc;
-      staleSolePwin = body.pwin;
-    }catch(e){ toast(`Could not save: ${e.message}`, true); return; }
-  }
-
-  if(hasAnswers){
-    try{
-      const res = await fetch(`/api/pursuits/${r.id}/answers`, {
-        method:'PATCH', credentials:'same-origin',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({scenario: qScenario, answers: qBuf})});
-      if(res.status===401){ showLogin(); return; }
-      if(!res.ok){
-        const body = await res.json().catch(()=>({}));
-        const msg = typeof body.detail==='string' ? body.detail
-                  : (body.detail && body.detail[0] && body.detail[0].msg)
-                    || `save failed (${res.status})`;
-        toast(msg, true); return;
-      }
-      qBuf = {};
-    }catch(e){ toast(`Could not save: ${e.message}`, true); return; }
-  }
+      toast(typeof d==='string'?d:(d.message||'Conflict'), true);
+      return;
+    }
+    if(!res.ok){
+      const msg = typeof body.detail==='string' ? body.detail
+                : (body.detail && body.detail[0] && body.detail[0].msg)
+                  || `save failed (${res.status})`;
+      toast(msg, true); return;
+    }
+    editBuf = {};
+    pwinNeedsRecalc = !!body.pwin_needs_recalc;
+    staleSolePwin = body.pwin;
+  }catch(e){ toast(`Could not save: ${e.message}`, true); return; }
 
   editUid = null;
   await loadData();              // re-read so derived values refresh too
@@ -3190,6 +3254,23 @@ function rebuildDerived(){
   } else {
     CARD_ORDER = Object.keys(DASH_CFG);
   }
+
+  // Per-user dashboard show/hide and chart-type settings (ddl/20_
+  // dashboard_card_settings.sql) -- same "missing means use the
+  // default" story as card order just above, applied per-card rather
+  // than to the whole blob: a stored settings object missing a card
+  // DASH_CFG has (a new user, or a card added since this user last
+  // touched the config panel) leaves that card's hardcoded default
+  // (DASH_CFG[k].on/.type) untouched, rather than breaking. Only on/
+  // type are merged in -- label is display text, never user data.
+  const storedSettings = D.dashboard_settings || {};
+  Object.keys(DASH_CFG).forEach(k=>{
+    const s = storedSettings[k];
+    if(s && typeof s === 'object'){
+      if(typeof s.on === 'boolean') DASH_CFG[k].on = s.on;
+      if(typeof s.type === 'string' && s.type) DASH_CFG[k].type = s.type;
+    }
+  });
 
   SB = null;   // sandbox is a copy of the portfolio; rebuild it
 }

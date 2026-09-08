@@ -461,7 +461,40 @@ def resolve_pursuit_dependency(cur, pursuit_id, user_id, depends_on_uid: str) ->
     other shape. Depth-capped at 50 purely as a safety net against
     already-malformed legacy data (this endpoint can never CREATE a
     cycle itself, since every write through it is checked here first).
+
+    Also a 400: THIS pursuit (not the target) is currently answered
+    LPTA (P2). Confirmed live before blocking it, rather than assumed:
+    a real LPTA pursuit's Dependent-Won Pwin CAN differ meaningfully
+    from its Base Pwin -- when the DEPENDENT_WON answers also change
+    the competitor price position (TM2/TM3), not just tech/mgmt/pp,
+    which LPTA's own DAP computation ignores. Blocked as a deliberate
+    product decision, not because blending would always be inert.
+
+    The sole-source check is NOT here -- see write.py's own caller,
+    which checks `merged["is_sole_source"]` (this same request's
+    pending value, not just the row's current one) before ever calling
+    this function, so a single PATCH setting is_sole_source AND a
+    dependency together is still caught.
     """
+    source = fetch_one(cur, """
+        SELECT o.label_text AS p2_answer
+          FROM pwin_assessment a
+          JOIN pwin_answer w ON w.pwin_assessment_id = a.id
+          JOIN question q ON q.id = w.question_id AND q.code = 'P2'
+          JOIN question_option o ON o.id = w.question_option_id
+         WHERE a.pursuit_id = %s AND a.scenario = 'BASE'
+           AND a.assessment_type = 'QUESTIONNAIRE'
+           AND a.id = (SELECT id FROM pwin_assessment a2
+                        WHERE a2.pursuit_id = a.pursuit_id
+                          AND a2.scenario = 'BASE'
+                          AND a2.assessment_type = 'QUESTIONNAIRE'
+                        ORDER BY a2.calculated_at DESC LIMIT 1)""",
+        (pursuit_id,))
+    if source and source["p2_answer"] == "LPTA":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "an LPTA pursuit cannot have a dependency")
+
     target = fetch_one(cur, """
         SELECT p.id FROM pursuit p
          WHERE p.external_opportunity_id = %s

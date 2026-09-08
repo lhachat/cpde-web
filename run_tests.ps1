@@ -107,6 +107,64 @@ try {
     Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
 }
 
+# Needs BOTH the API and a live AWS session -- a real recalculation
+# calls the real engine. Skipped, not failed, if either is unavailable.
+Write-Host "`n########## LPTA EVAL_TYPE DERIVATION ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    docker exec cpde-api python -c "import boto3; boto3.client('sts').get_caller_identity()" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        python test_lpta_eval_type.py --base http://localhost:8001 --admin-dsn $ADMIN
+        if ($LASTEXITCODE -ne 0) { $fail = 1 }
+    } else {
+        Write-Host "SKIPPED - no live AWS session in the api container; run .\refresh-aws-creds.ps1 first" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
+# Needs BOTH the API and a live AWS session -- a real recalculation
+# calls the real engine to establish base_pwin before the blend is
+# applied on top of it.
+Write-Host "`n########## BLENDED_PWIN (dependency blend) ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    docker exec cpde-api python -c "import boto3; boto3.client('sts').get_caller_identity()" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        python test_blended_pwin.py --base http://localhost:8001 --admin-dsn $ADMIN
+        if ($LASTEXITCODE -ne 0) { $fail = 1 }
+    } else {
+        Write-Host "SKIPPED - no live AWS session in the api container; run .\refresh-aws-creds.ps1 first" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
+Write-Host "`n########## SOLE-SOURCE/LPTA DEPENDENCY RESTRICTION ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    python test_dependency_restrictions.py --base http://localhost:8001 --admin-dsn $ADMIN
+    if ($LASTEXITCODE -ne 0) { $fail = 1 }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
+# Needs BOTH the API and a live AWS session -- reverting to Pre-BH
+# triggers a real recalculation against the live engine.
+Write-Host "`n########## REVERT TO PRE-BH (fresh recalculation) ##########" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri "http://localhost:8001/health" -TimeoutSec 3 -UseBasicParsing | Out-Null
+    docker exec cpde-api python -c "import boto3; boto3.client('sts').get_caller_identity()" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        python test_revert_to_pre_bh.py --base http://localhost:8001 --admin-dsn $ADMIN
+        if ($LASTEXITCODE -ne 0) { $fail = 1 }
+    } else {
+        Write-Host "SKIPPED - no live AWS session in the api container; run .\refresh-aws-creds.ps1 first" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "SKIPPED - API not reachable on :8001" -ForegroundColor Yellow
+}
+
 # Needs BOTH the API and a live AWS session -- submitting a Black Hat
 # assessment calls the real resolve_fee() against whatever the running
 # API process has cached from the live engine, same reasoning as

@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field, field_validator
 from ..auth import Principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
 from ..fee import resolve_fee
+from ..recalc import apply_dependency_blend
 
 router = APIRouter(prefix="/api", tags=["bhptw"])
 
@@ -182,10 +183,16 @@ async def submit_black_hat(
             UPDATE pwin_assessment SET is_current = FALSE
              WHERE pursuit_id = %s AND scenario = %s AND is_current""",
             (pursuit_id, body.scenario))
-        # No dependency blend is computed here (that math lives in the
-        # engine's /v1/run, which BH/PTW never calls) -- pwin only equals
-        # base_pwin outright when there is nothing to blend against.
-        pwin_val = body.base_pwin if not has_dep else None
+        # DEPENDENT_WON's own pwin is always a standalone value -- never
+        # itself blended (blending happens on the BASE row, USING this
+        # scenario's pwin as one of its inputs). Only a BASE submission
+        # on a dependent pursuit defers pwin, filled in below by
+        # apply_dependency_blend() -- the same blend recalc.py's own
+        # Pre-BH path uses (BH/PTW never calls the engine, but the blend
+        # itself is pure arithmetic over already-stored Pwin values, not
+        # an engine call).
+        blend_pending = has_dep and body.scenario == "BASE"
+        pwin_val = None if blend_pending else body.base_pwin
         row = fetch_one(cur, """
             INSERT INTO pwin_assessment
                 (pursuit_id, scenario, assessment_type, engine_version,
@@ -196,6 +203,15 @@ async def submit_black_hat(
                    completed_date""",
             (pursuit_id, body.scenario, p.user_id, body.base_pwin,
              pwin_val, body.investment, body.completed_date, opt["id"]))
+
+        if has_dep:
+            apply_dependency_blend(cur, pursuit_id, pu["depends_on_pursuit_id"])
+            if blend_pending:
+                refreshed = fetch_one(cur, """
+                    SELECT pwin, blended_pwin FROM pwin_assessment
+                     WHERE id = %s""", (row["id"],))
+                row["pwin"] = refreshed["pwin"]
+                row["blended_pwin"] = refreshed["blended_pwin"]
 
         # planned_investment kept in sync the same way planned_fee_rate
         # already is -- this is the ONLY place that column is written
@@ -213,7 +229,6 @@ async def submit_black_hat(
 
         row["fee"] = fee
         row["black_hat_ptw_complete"] = _recompute_complete(cur, pursuit_id, has_dep)
-        row["pwin_needs_recalc"] = has_dep
     return row
 
 
@@ -233,7 +248,11 @@ async def submit_ptw(
             UPDATE pwin_assessment SET is_current = FALSE
              WHERE pursuit_id = %s AND scenario = %s AND is_current""",
             (pursuit_id, body.scenario))
-        pwin_val = body.base_pwin if not has_dep else None
+        # See submit_black_hat's identical comment: DEPENDENT_WON's own
+        # pwin is always standalone; only a BASE submission on a
+        # dependent pursuit defers pwin to apply_dependency_blend() below.
+        blend_pending = has_dep and body.scenario == "BASE"
+        pwin_val = None if blend_pending else body.base_pwin
         row = fetch_one(cur, """
             INSERT INTO pwin_assessment
                 (pursuit_id, scenario, assessment_type, engine_version,
@@ -245,6 +264,15 @@ async def submit_ptw(
             (pursuit_id, body.scenario, p.user_id, body.base_pwin,
              pwin_val, body.investment, body.completed_date,
              body.margin_rate, body.bid_price))
+
+        if has_dep:
+            apply_dependency_blend(cur, pursuit_id, pu["depends_on_pursuit_id"])
+            if blend_pending:
+                refreshed = fetch_one(cur, """
+                    SELECT pwin, blended_pwin FROM pwin_assessment
+                     WHERE id = %s""", (row["id"],))
+                row["pwin"] = refreshed["pwin"]
+                row["blended_pwin"] = refreshed["blended_pwin"]
 
         # PTW is a direct override of the fee formula -- no engine call,
         # no fee-config lookup, unlike Black Hat. planned_investment kept
@@ -261,7 +289,6 @@ async def submit_ptw(
         row["margin_rate"] = body.margin_rate
         row["bid_price"] = body.bid_price
         row["black_hat_ptw_complete"] = _recompute_complete(cur, pursuit_id, has_dep)
-        row["pwin_needs_recalc"] = has_dep
     return row
 
 
