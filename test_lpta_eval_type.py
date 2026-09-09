@@ -89,6 +89,34 @@ def sent_eval_type(db, pursuit_id):
     return row["eval_type"] if row else None
 
 
+def current_id(db, pursuit_id):
+    row = db.execute("""
+        SELECT id FROM pwin_assessment
+         WHERE pursuit_id = %s AND scenario = 'BASE' AND is_current""",
+        (pursuit_id,)).fetchone()
+    return row["id"] if row else None
+
+
+def undo_recalc(db, pursuit_id, original_id):
+    """Deletes the pwin_assessment row /recalculate created for this
+    pursuit during this test run (identified precisely: the current row
+    now, only if it differs from the id captured BEFORE this test ever
+    called /recalculate) and restores is_current onto the original row.
+    finally-block only -- this test's own repeated runs were
+    accumulating permanent history otherwise (confirmed live: 1055/1060
+    had 42/50 pwin_assessment rows before this fix, purely from re-runs
+    of this suite and test_blended_pwin.py)."""
+    if original_id is None:
+        return
+    now_id = current_id(db, pursuit_id)
+    if now_id is None or now_id == original_id:
+        return
+    db.execute("DELETE FROM pwin_answer WHERE pwin_assessment_id = %s", (now_id,))
+    db.execute("DELETE FROM pwin_assessment WHERE id = %s", (now_id,))
+    db.execute("UPDATE pwin_assessment SET is_current = TRUE WHERE id = %s",
+               (original_id,))
+
+
 def p2_answer(db, uid):
     return db.execute("""
         SELECT o.label_text FROM pwin_assessment a
@@ -133,29 +161,56 @@ def main():
 
     A = login(args.base, "aero.admin@demoaero.test")
 
-    print("\n=== eval_type sent to the engine matches the real stored "
-          "P2 answer, not a hardcoded literal ===")
-    r = safe(A.post, f"/api/pursuits/{p_lpta['id']}/recalculate", json={})
-    check("recalculating the real LPTA pursuit succeeds",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
+    # Captured BEFORE either /recalculate call -- what the finally block
+    # below restores each pursuit's current BASE row back onto.
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        sent = sent_eval_type(db, p_lpta["id"])
-    check("the engine_request ACTUALLY PERSISTED for the LPTA pursuit "
-          "names eval_type='LPTA' -- not the old hardcoded 'Best Value' "
-          "literal, and not just asserted from the code, read back from "
-          "what was really sent",
-          sent == "LPTA", f"got {sent!r}")
+        orig_lpta_id = current_id(db, p_lpta["id"])
+        orig_bv_id = current_id(db, p_bv["id"])
 
-    r = safe(A.post, f"/api/pursuits/{p_bv['id']}/recalculate", json={})
-    check("recalculating the real Best Value pursuit succeeds",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        sent_bv = sent_eval_type(db, p_bv["id"])
-    check("the engine_request for the Best Value pursuit still names "
-          "eval_type='Best Value' -- proves this isn't just a second "
-          "hardcoded literal ('always LPTA' would also make the first "
-          "check above pass)",
-          sent_bv == "Best Value", f"got {sent_bv!r}")
+    try:
+        print("\n=== eval_type sent to the engine matches the real stored "
+              "P2 answer, not a hardcoded literal ===")
+        r = safe(A.post, f"/api/pursuits/{p_lpta['id']}/recalculate", json={})
+        check("recalculating the real LPTA pursuit succeeds",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            sent = sent_eval_type(db, p_lpta["id"])
+        check("the engine_request ACTUALLY PERSISTED for the LPTA pursuit "
+              "names eval_type='LPTA' -- not the old hardcoded 'Best Value' "
+              "literal, and not just asserted from the code, read back from "
+              "what was really sent",
+              sent == "LPTA", f"got {sent!r}")
+
+        r = safe(A.post, f"/api/pursuits/{p_bv['id']}/recalculate", json={})
+        check("recalculating the real Best Value pursuit succeeds",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            sent_bv = sent_eval_type(db, p_bv["id"])
+        check("the engine_request for the Best Value pursuit still names "
+              "eval_type='Best Value' -- proves this isn't just a second "
+              "hardcoded literal ('always LPTA' would also make the first "
+              "check above pass)",
+              sent_bv == "Best Value", f"got {sent_bv!r}")
+    finally:
+        # Unconditional, direct-SQL -- runs even if a check above raised.
+        # Deletes only the row(s) THIS run created (see undo_recalc's own
+        # docstring for exactly how that's identified) and restores each
+        # pursuit's original current row -- so running this suite twice
+        # in a row never accumulates a second run's worth of rows.
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            undo_recalc(db, p_lpta["id"], orig_lpta_id)
+            undo_recalc(db, p_bv["id"], orig_bv_id)
+            db.commit()
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            final_lpta_id = current_id(db, p_lpta["id"])
+            final_bv_id = current_id(db, p_bv["id"])
+        check("cleanup: 1055's current BASE row is the original one -- "
+              "this run's own recalculation was undone, not left behind",
+              orig_lpta_id is None or final_lpta_id == orig_lpta_id,
+              f"got {final_lpta_id}, expected {orig_lpta_id}")
+        check("cleanup: 1060's current BASE row is the original one",
+              orig_bv_id is None or final_bv_id == orig_bv_id,
+              f"got {final_bv_id}, expected {orig_bv_id}")
 
     print(f"\n{'='*58}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

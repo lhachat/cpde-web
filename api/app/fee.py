@@ -16,10 +16,14 @@ a second copy of it.
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException, status
 
 from . import scoring
 from .db import fetch_one
+
+logger = logging.getLogger("fee")
 
 
 def resolve_fee(cur, contract_type_id, p1_option_id):
@@ -48,7 +52,14 @@ def resolve_fee(cur, contract_type_id, p1_option_id):
         base_rate = scoring.fee_rate_for_label(row["contract_label"])
         price_delta = scoring.lookup("p1", row["p1_label"])["client_price"]
     except scoring.ScoringTableError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
+        # ScoringTableError's own text can transitively embed an
+        # engine-fetch failure's detail (an SSM path, a URL) -- log it,
+        # never forward it verbatim to the client.
+        logger.error("scoring table unavailable during fee resolution: %s", exc)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Fee cannot be computed right now -- the scoring engine is "
+            "unavailable. Try again shortly.")
 
     if base_rate is None:
         raise HTTPException(

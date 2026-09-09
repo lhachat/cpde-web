@@ -348,6 +348,19 @@ tr.nobid td b{text-decoration:line-through}
 let D = {pursuits: [], targets: [], staffing: {months: [], cats: [], demand: {}, total: []},
          planning_year: new Date().getFullYear()};
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+/* THE one HTML-escaping helper. Every server-echoed or user-controlled
+   string that is interpolated into an HTML string (innerHTML, an
+   attribute value, an <option>, an SVG <title>) goes through this
+   first. Found by the security audit: nothing in this file escaped
+   anything, and a pursuit name containing markup executed script for
+   every user in the tenant (stored XSS). The API deliberately stores
+   text as typed -- escaping is an OUTPUT concern, applied here at the
+   boundary between data and markup, never a storage transformation.
+   Safe for attribute values too (quotes are escaped). Do NOT use it for
+   textContent/value assignments -- those are already inert and would
+   show the entities literally. */
+const ESC_MAP={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>ESC_MAP[c]);
 /* Set innerHTML only if the target exists. A missing container is a bug
    worth logging, not worth throwing over -- one view failing should not
    take the whole page down with it. */
@@ -380,8 +393,14 @@ let P=D.pursuits;
    DISPLAYED here resolves to the Opportunity ID and name instead. */
 const BY_UID={}, DEPS_OF={}, DEPENDENTS={};
 const isDependent=u=>DEPS_OF[u]!=null, isDependedOn=u=>!!DEPENDENTS[u];
-const oppRef=u=>{const t=BY_UID[u];return t?`${t.opp_id??'?'}`:String(u??'?');};
-const oppName=u=>{const t=BY_UID[u];return t?t.name:(DEP_NAME[u]||'unknown pursuit');};
+// oppName/oppRef are HTML-context helpers: every one of their call sites
+// interpolates into markup (a cell, a title attribute, an <option>), so
+// they return ESCAPED text. oppNameRaw is the unescaped name for the
+// few textContent-style consumers (toast messages) that must not show
+// entities literally.
+const oppRef=u=>{const t=BY_UID[u];return esc(t?(t.opp_id??'?'):(u??'?'));};
+const oppNameRaw=u=>{const t=BY_UID[u];return t?t.name:(DEP_NAME[u]||'unknown pursuit');};
+const oppName=u=>esc(oppNameRaw(u));
 const DEP_NAME={};
 const depMark=u=>{
   if(isDependent(u)){const d=DEPS_OF[u];
@@ -411,7 +430,7 @@ function dependencyOptionsFor(r){
   const cands=(D.dependency_candidates||[]).filter(c=>
     c.uid!==r.uid && DEPS_OF[c.uid]!==r.uid);
   if(r.dep && !cands.some(c=>c.uid===r.dep))
-    cands.unshift({uid:r.dep, name:`${oppName(r.dep)} (closed)`});
+    cands.unshift({uid:r.dep, name:`${oppNameRaw(r.dep)} (closed)`});   // raw: fieldRow escapes option labels
   return cands;
 }
 
@@ -462,8 +481,8 @@ function barsGrouped(series,labels,colors,{h=190,fmt=M,pad=36,w=760}={}){
   labels.forEach((l,i)=>{const x0=pad+6+i*gw;
     series.forEach((s,j)=>{
       const bx=x0+(gw-bw*series.length-4*(series.length-1))/2+j*(bw+4), vy=y(s.v[i]);
-      g+=`<rect x="${bx}" y="${vy}" width="${bw}" height="${Math.max(0,h-15-vy)}" fill="${colors[j]}" rx="1"><title>${s.name} ${l}: ${fmt(s.v[i])}</title></rect>`;});
-    g+=`<text class="axl" x="${x0+gw/2}" y="${h-2}" text-anchor="middle">${l}</text>`;});
+      g+=`<rect x="${bx}" y="${vy}" width="${bw}" height="${Math.max(0,h-15-vy)}" fill="${colors[j]}" rx="1"><title>${esc(s.name)} ${esc(l)}: ${fmt(s.v[i])}</title></rect>`;});
+    g+=`<text class="axl" x="${x0+gw/2}" y="${h-2}" text-anchor="middle">${esc(l)}</text>`;});
   g+=`<line class="ax" x1="${pad}" x2="${w}" y1="${h-15}" y2="${h-15}"/>`;
   return `<svg viewBox="0 0 ${w} ${h}">${g}</svg>`;
 }
@@ -485,13 +504,13 @@ function comboChart(series,labels,colors,{h=190,fmt=M,pad=36,w=760}={}){
   labels.forEach((l,i)=>{const x0=pad+6+i*gw;
     barS.forEach((s,j)=>{
       const bx=x0+(gw-bw*barS.length-4*(barS.length-1))/2+j*(bw+4), vy=y(s.v[i]);
-      g+=`<rect x="${bx}" y="${vy}" width="${bw}" height="${Math.max(0,h-15-vy)}" fill="${colors[j+1]}" rx="1"><title>${s.name} ${l}: ${fmt(s.v[i])}</title></rect>`;});
-    g+=`<text class="axl" x="${x0+gw/2}" y="${h-2}" text-anchor="middle">${l}</text>`;
+      g+=`<rect x="${bx}" y="${vy}" width="${bw}" height="${Math.max(0,h-15-vy)}" fill="${colors[j+1]}" rx="1"><title>${esc(s.name)} ${esc(l)}: ${fmt(s.v[i])}</title></rect>`;});
+    g+=`<text class="axl" x="${x0+gw/2}" y="${h-2}" text-anchor="middle">${esc(l)}</text>`;
     pts.push([x0+gw/2,y(lineS.v[i])]);});
   g+=`<path d="${pts.map((p,i)=>(i===0?'M':'L')+p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ')}"
         fill="none" stroke="${colors[0]}" stroke-width="2"/>`;
   pts.forEach((p,i)=>{g+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5"
-    fill="${colors[0]}" stroke="#fff" stroke-width="1"><title>${lineS.name} ${labels[i]}: ${fmt(lineS.v[i])}</title></circle>`;});
+    fill="${colors[0]}" stroke="#fff" stroke-width="1"><title>${esc(lineS.name)} ${esc(labels[i])}: ${fmt(lineS.v[i])}</title></circle>`;});
   g+=`<line class="ax" x1="${pad}" x2="${w}" y1="${h-15}" y2="${h-15}"/>`;
   return `<svg viewBox="0 0 ${w} ${h}">${g}</svg>`;
 }
@@ -520,11 +539,11 @@ function pieChart(rows,{h=150,w=150,valueKey='value'}={}){
     const large=(a1-a0)>Math.PI?1:0;
     g+=`<path d="M${cx},${cy} L${x0.toFixed(2)},${y0.toFixed(2)}
       A${rad},${rad} 0 ${large} 1 ${x1.toFixed(2)},${y1.toFixed(2)} Z"
-      fill="${PIE_COLORS[i%PIE_COLORS.length]}"><title>${row.k}: ${M(row[valueKey])} (${(frac*100).toFixed(1)}%)</title></path>`;
+      fill="${PIE_COLORS[i%PIE_COLORS.length]}"><title>${esc(row.k)}: ${M(row[valueKey])} (${(frac*100).toFixed(1)}%)</title></path>`;
     ang=a1;});
   return `<svg viewBox="0 0 ${w} ${h}" style="width:${w}px;height:${h}px;max-width:100%">${g}</svg>`;
 }
-const legend=(n,c)=>'<div class="lg">'+n.map((x,i)=>`<span><i style="background:${c[i]}"></i>${x}</span>`).join('')+'</div>';
+const legend=(n,c)=>'<div class="lg">'+n.map((x,i)=>`<span><i style="background:${c[i]}"></i>${esc(x)}</span>`).join('')+'</div>';
 const CCOL=['#0D0D0D','#22350E','#3B6D11','#4E8A1B','#639F2C','#7CB343','#96C463','#AFD289',
  '#C5DCA8','#555555','#6E6E6E','#888888','#A0A0A0','#B8B8B8','#8A6A17','#A6862F','#C2A455','#D8C58A'];
 function stackedArea(months,cats,demand,{h=250}={}){
@@ -538,7 +557,7 @@ function stackedArea(months,cats,demand,{h=250}={}){
   cats.forEach((c,ci)=>{const top=acc.map((a,i)=>a+demand[c][i]);
     const up=top.map((v,i)=>`${X(i)},${Y(v)}`).join(' ');
     const dn=acc.map((v,i)=>`${X(i)},${Y(v)}`).reverse().join(' ');
-    g+=`<polygon points="${up} ${dn}" fill="${CCOL[ci%CCOL.length]}" opacity=".95"><title>${c}</title></polygon>`;acc=top;});
+    g+=`<polygon points="${up} ${dn}" fill="${CCOL[ci%CCOL.length]}" opacity=".95"><title>${esc(c)}</title></polygon>`;acc=top;});
   months.forEach((m,i)=>{if(i%3)return;g+=`<text class="axl" x="${X(i)}" y="${h-6}" text-anchor="middle">${m}</text>`;});
   const pk=totals.indexOf(Math.max(...totals));
   g+=`<line x1="${X(pk)}" x2="${X(pk)}" y1="12" y2="${h-20}" stroke="#8C2F27" stroke-width="1" stroke-dasharray="3 3"/>
@@ -567,21 +586,28 @@ function histogram(vals,{h=190,bins=10}={}){
   g+=`<text class="axl" x="0" y="0" text-anchor="middle" transform="translate(12,${ptY}) rotate(-90)" style="font-weight:600">Pursuits</text>`;
   return `<svg viewBox="0 0 ${w} ${h}">${g}</svg>`;
 }
-/* THE single source of truth for what Pwin to show. Sole source is 95%
-   by definition (the residual is the customer not awarding at all) --
-   this must be applied everywhere a Pwin is displayed, not just in the
-   detail view, or the table and the detail page disagree on the same
-   pursuit, as they did before this fix. */
-function effectivePwin(r){ return r.sole ? 0.95 : r.pwin; }
+// effectivePwin() removed (security/quality audit, 2026-09-09): it
+// silently displayed a hardcoded 95% for any sole-source pursuit
+// regardless of what `pwin` actually held, so a stale stored value
+// (found real and live on several pursuits -- is_sole_source_pwin=false
+// despite is_sole_source=true) was invisible in every view that used it,
+// while bootstrap.py's own `prob = value * pwin` computed the
+// dollar-weighted probability from the SAME real, stale number right
+// next to the masked display -- the two disagreed on screen, and only
+// one of them was lying. The server-side sole-source write path
+// (write.py) now genuinely maintains pwin=0.95 for a correctly-flagged
+// sole-source pursuit; the client trusts `r.pwin` directly everywhere,
+// same as any other pursuit. If the server is ever wrong again, that
+// must be visibly wrong, not masked.
 function pctInt(v){ return v==null ? null : Math.round(v*100); }
 
 function pwinCell(v){if(v==null)return '<span style="color:#888">\u2014</span>';
   const cls=v<0.2?'vlo':v<0.4?'lo':'';
   return `<span class="pb"><span class="t"><span class="f ${cls}" style="width:${(v*100).toFixed(0)}%"></span></span><b class="num">${Math.round(v*100)}%</b></span>`;}
 const stagePill=s=>{const m={'Pre-BH':'p-pre','Post-BH':'p-bh','Post-PTW':'p-ptw'};
-  return `<span class="pill ${m[s]||'p-pre'}">${s||'\u2014'}</span>`;};
-const bidPill=b=>`<span class="pill ${b==='Bid'?'p-bid':'p-nobid'}">${b||'\u2014'}</span>`;
-const outPill=o=>o?`<span class="pill ${o==='Won'?'p-won':o==='Lost'?'p-lost':'p-can'}">${o}</span>`:'<span class="pill p-pre">Open</span>';
+  return `<span class="pill ${m[s]||'p-pre'}">${esc(s||'\u2014')}</span>`;};
+const bidPill=b=>`<span class="pill ${b==='Bid'?'p-bid':'p-nobid'}">${esc(b||'\u2014')}</span>`;
+const outPill=o=>o?`<span class="pill ${o==='Won'?'p-won':o==='Lost'?'p-lost':'p-can'}">${esc(o)}</span>`:'<span class="pill p-pre">Open</span>';
 
 /* ---------- year selector ---------- */
 let selYear=PY;
@@ -618,8 +644,8 @@ function tools(v){
     // Same convention as the Targets picker: a single option (nothing to
     // choose between) means no selector, not a picker of one.
     const scopePicker = opts.length>1 ? `<select id="scopeSel">
-      ${opts.map(o=>`<option value="${o.id}" ${o.id===selectedScopeNodeId?'selected':''}>
-        ${o.name} (${o.kind==='rollup'?'Rollup':o.code})</option>`).join('')}
+      ${opts.map(o=>`<option value="${esc(o.id)}" ${o.id===selectedScopeNodeId?'selected':''}>
+        ${esc(o.name)} (${o.kind==='rollup'?'Rollup':esc(o.code)})</option>`).join('')}
       </select>` : '';
     $('#tools').innerHTML=`<span style="font-size:11px;color:#888">Year</span>
       <select id="ySel">${YRS.map(y=>`<option ${y===selYear?'selected':''}>${y}</option>`).join('')}</select>
@@ -710,7 +736,7 @@ function cfgPanel(){
 /* Generic table renderer used when a chart is switched to table view. */
 function seriesTable(series,labels,fmt){
   return `<div class="tw"><table><thead><tr><th>Year</th>
-    ${series.map(s=>`<th class="r">${s.name}</th>`).join('')}
+    ${series.map(s=>`<th class="r">${esc(s.name)}</th>`).join('')}
     <th class="r">Variance</th></tr></thead><tbody>
     ${labels.map((l,i)=>{const d=(series[1]?series[1].v[i]:0)-(series[0]?series[0].v[i]:0);
       return `<tr><td class="num">${l}</td>${series.map(s=>
@@ -793,14 +819,14 @@ function vDash(){
      <div class="note">${selYear} probabilistic revenue is ${M(a.rev)} against a ${M(t.rev_target||0)} target \u2014 ${gap>=0?'ahead by':'short by'} ${M(Math.abs(gap))}.</div></div>`,
     summary:`<div class="card"><h3>Portfolio summary</h3>
      <ul class="sum">
-      <li><a onclick="goToPursuits({outcome:'OPEN'})">Open pursuits</a><span class="r num">${OPEN.length}<em>${M(sum(OPEN,x=>x.value))}</em></span></li>
-      <li><a onclick="goToPursuits({bid:'Bid'})">Bid decisions</a><span class="r num">${bid} bid / ${nobid} no-bid${
+      <li><a data-go='{"outcome":"OPEN"}'>Open pursuits</a><span class="r num">${OPEN.length}<em>${M(sum(OPEN,x=>x.value))}</em></span></li>
+      <li><a data-go='{"bid":"Bid"}'>Bid decisions</a><span class="r num">${bid} bid / ${nobid} no-bid${
         (P.length-bid-nobid)>0 ? `<em>${P.length-bid-nobid} undecided</em>` : ''}</span></li>
-      <li><a onclick="goToPursuits({sole:true})">Sole source</a><span class="r num">${P.filter(x=>x.sole).length}<em>${M(sum(P.filter(x=>x.sole),x=>x.value))}</em></span></li>
-      <li><a onclick="goToPursuits({dep:true})">Dependent pursuits</a><span class="r num">${P.filter(x=>x.dep).length}<em>linked</em></span></li>
-      <li><a onclick="goToPursuits({pwin:'hi'})">Pwin at or above 50%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin>=.5).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin>=.5),x=>x.value))}</em></span></li>
-      <li><a onclick="goToPursuits({pwin:'lo'})">Pwin below 20%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin<.2).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin<.2),x=>x.value))}</em></span></li>
-      <li><a onclick="show('staffing')">Peak staffing demand</a><span class="r num">${Math.max(...D.staffing.total).toFixed(0)}<em>FTE</em></span></li>
+      <li><a data-go='{"sole":true}'>Sole source</a><span class="r num">${P.filter(x=>x.sole).length}<em>${M(sum(P.filter(x=>x.sole),x=>x.value))}</em></span></li>
+      <li><a data-go='{"dep":true}'>Dependent pursuits</a><span class="r num">${P.filter(x=>x.dep).length}<em>linked</em></span></li>
+      <li><a data-go='{"pwin":"hi"}'>Pwin at or above 50%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin>=.5).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin>=.5),x=>x.value))}</em></span></li>
+      <li><a data-go='{"pwin":"lo"}'>Pwin below 20%</a><span class="r num">${OPEN_COUNTED.filter(x=>x.pwin<.2).length}<em>${M(sum(OPEN_COUNTED.filter(x=>x.pwin<.2),x=>x.value))}</em></span></li>
+      <li><a data-show="staffing">Peak staffing demand</a><span class="r num">${Math.max(...D.staffing.total).toFixed(0)}<em>FTE</em></span></li>
      </ul></div>`,
     outcomes:`<div class="card"><h3>Outcomes by year <small>decided pursuits</small></h3>
     <div class="tw"><table><thead><tr><th>Year</th><th class="r">Won</th><th class="r">Lost</th>
@@ -824,7 +850,7 @@ function vDash(){
     invchart:`<div class="card"><h3>Investment \u2014 planned vs. budget</h3>
      ${chartOrTable('invchart',[{name:'Budget',v:YRS.map(y=>DTG[y].inv_budget||0)},{name:'Planned',v:byYear().map(r=>r.inv)}],YRS,['#B8B8B8','#3B6D11'],['Investment budget','Planned investment'])}</div>`,
     market:`<div class="card"><h3>Revenue by market</h3>
-    ${catBody('market',grp('market',OPEN),k=>k)}
+    ${catBody('market',grp('market',OPEN),k=>esc(k))}
     <div class="note">Pursuits/Value/Probabilistic here are every open pursuit; Avg Pwin is Bid only, cancelled excluded -- same rule as the rest of this dashboard.</div></div>`,
     phase:`<div class="card"><h3>Revenue by competitive analysis phase</h3>
     ${catBody('phase',grp('stage',OPEN),stagePill)}
@@ -1059,7 +1085,7 @@ function vPursuits(){
   const fo=filt.filter(x=>!x.outcome);
   const fob=fo.filter(x=>isBid(x.uid));
   const sel=(id,lbl,opts,val)=>`<label>${lbl}</label><select data-f="${id}">
-    <option value="">All</option>${opts.map(o=>`<option value="${o[0]}" ${val===o[0]?'selected':''}>${o[1]}</option>`).join('')}</select>`;
+    <option value="">All</option>${opts.map(o=>`<option value="${esc(o[0])}" ${val===o[0]?'selected':''}>${esc(o[1])}</option>`).join('')}</select>`;
   const i0=YRS.indexOf(selYear), t=DTG[selYear];
   const ag=yearAgg(listFor(),i0);
   const bpVar=(t.bp_budget||0)-ag.bp, revVar=ag.rev-(t.rev_target||0);
@@ -1101,10 +1127,10 @@ function vPursuits(){
     against ${selYear} budget recompute immediately, and <b>the change is saved</b>.
     (The Scenario Sandbox is the place to try changes without saving them.)</div>
   ${dashFilterNote ? `<div class="flag">Showing <b>${dashFilterNote}</b> \u2014 filtered from the dashboard.
-    <button class="btn gh" style="padding:2px 9px;font-size:11px;margin-left:8px" onclick="dashFilterNote='';FLT={market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:'',sole:''};vPursuits();">Clear filter</button></div>` : ''}
+    <button class="btn gh" style="padding:2px 9px;font-size:11px;margin-left:8px" data-clear-filter>Clear filter</button></div>` : ''}
   <div class="card"><h3>Pursuits <small>click a column to sort \u00b7 click a row to open</small></h3>
    <div class="filters">
-     <input type="text" id="fq" placeholder="Search name or ID" value="${FLT.q}" style="width:170px">
+     <input type="text" id="fq" placeholder="Search name or ID" value="${esc(FLT.q)}" style="width:170px">
      ${sel('market','Market',uniq('market').map(m=>[m,m]),FLT.market)}
      ${sel('stage','Phase',uniq('stage').map(m=>[m,m]),FLT.stage)}
      ${sel('bid','Bid',[['Bid','Bid'],['No Bid','No Bid']],FLT.bid)}
@@ -1117,14 +1143,14 @@ function vPursuits(){
      <span style="margin-left:auto;font-size:11px;color:var(--ink-3)">${filt.length} of ${P.length}</span>
    </div>
   <div class="tw pursuits-scroll"><table><thead><tr>${cols.map(c=>`<th class="s ${c[2]}" data-k="${c[0]}">${c[1]}${sortKey===c[0]?(sortDir>0?' \u25b2':' \u25bc'):''}</th>`).join('')}</tr></thead>
-  <tbody>${rows.map(r=>`<tr class="click${r.uid===selUid?' sel':''}${depRow(r.uid)}${!r.outcome&&!isBid(r.uid)?' nobid':''}" data-uid="${r.uid}">
+  <tbody>${rows.map(r=>`<tr class="click${r.uid===selUid?' sel':''}${depRow(r.uid)}${!r.outcome&&!isBid(r.uid)?' nobid':''}" data-uid="${esc(r.uid)}">
     <td class="r">${r.outcome?'<span style="color:#888">\u2014</span>'
-      :`<label class="tg"><input type="checkbox" class="bidT" data-u="${r.uid}" ${isBid(r.uid)?'checked':''}><span></span></label>`}</td>
-    <td><b>${r.name}</b>${depMark(r.uid)}${r.sole?' <span class="pill p-ptw">SS</span>':''}</td>
-    <td class="r num">${r.opp_id??'\u2014'}</td><td>${r.market||'\u2014'}</td><td>${r.contract||'\u2014'}</td>
+      :`<label class="tg"><input type="checkbox" class="bidT" data-u="${esc(r.uid)}" ${isBid(r.uid)?'checked':''}><span></span></label>`}</td>
+    <td><b>${esc(r.name)}</b>${depMark(r.uid)}${r.sole?' <span class="pill p-ptw">SS</span>':''}</td>
+    <td class="r num">${esc(r.opp_id??'\u2014')}</td><td>${esc(r.market||'\u2014')}</td><td>${esc(r.contract||'\u2014')}</td>
     <td>${stagePill(r.stage)}</td>
     <td class="r num">${money(r.value)}</td><td class="r num">${(r.fee*100).toFixed(1)}%</td>
-    <td class="r">${pwinCell(effectivePwin(r))}</td><td class="r num">${money(r.prob)}</td>
+    <td class="r">${pwinCell(r.pwin)}</td><td class="r num">${money(r.prob)}</td>
     <td class="r num">${money(r.bp)}</td><td class="num">${r.bp_start||'\u2014'}</td>
     <td class="num">${r.due||'\u2014'}</td><td class="num">${r.award||'\u2014'}</td><td>${outPill(r.outcome)}</td></tr>`).join('')}
   </tbody><tfoot><tr><td></td><td>Totals \u00b7 filtered, bid only</td><td colspan="4"></td>
@@ -1285,7 +1311,7 @@ function renderQ(ans,baseAns,type,editable){
     if(QSEC[k]!==sec){sec=QSEC[k];
       const secOff = lpta && (sec==='Technical & Management' || sec==='Past Performance');
       out+=`<div style="padding:8px 14px;background:#0D0D0D;color:#C5DCA8;font-size:9.5px;
-        letter-spacing:.14em;text-transform:uppercase;font-weight:600">${sec}${
+        letter-spacing:.14em;text-transform:uppercase;font-weight:600">${esc(sec)}${
         secOff?' <span style="color:#8A8A8A;text-transform:none;letter-spacing:0"> \u2014 not scored under LPTA</span>':''}</div>`;}
     const dis = lpta && LPTA_OFF.includes(k);
     const changed = ans[k]!==baseAns[k];
@@ -1299,11 +1325,11 @@ function renderQ(ans,baseAns,type,editable){
     else if(k==='TM 1b'&&!isProd(type)&&ans['TM 1a']==='No')
       why=' &middot; one option removed (TM1a = No)';
     out+=`<div class="q" style="${changed?'background:#EAF3DE;':''}${dis||locked?'opacity:.55;':''}">
-      <label>${qPrompt(k,type)}${changed?' &middot; changed':''}${why}
-        <span class="qhelp" onclick="showHelp('${k}','${(type||'').replace(/'/g,'')}')"
+      <label>${esc(qPrompt(k,type))}${changed?' &middot; changed':''}${why}
+        <span class="qhelp" data-help="${esc(k)}" data-help-type="${esc(type||'')}"
               title="What does this question mean?">?</span></label>
-      <select data-a="${k}" ${dis||locked||!editable?'disabled':''}>
-        ${opts.map(o=>`<option ${o===ans[k]?'selected':''}>${o}</option>`).join('')}
+      <select data-a="${esc(k)}" ${dis||locked||!editable?'disabled':''}>
+        ${opts.map(o=>`<option ${o===ans[k]?'selected':''}>${esc(o)}</option>`).join('')}
       </select></div>`;});
   return out;
 }
@@ -1368,10 +1394,10 @@ function detailView(uid){
   $('#pursuits').innerHTML=`
   <div class="dtbar">
     <button class="btn gh" id="dBack">&larr; Back to pursuits</button>
-    <div class="dtt"><b>${r.name}</b> ${depMark(r.uid)}
-      <span>ID ${r.opp_id??'\u2014'} &middot; ${r.market||'\u2014'} &middot; ${(r.type||'').slice(0,44)}</span>
+    <div class="dtt"><b>${esc(r.name)}</b> ${depMark(r.uid)}
+      <span>ID ${esc(r.opp_id??'\u2014')} &middot; ${esc(r.market||'\u2014')} &middot; ${esc((r.type||'').slice(0,44))}</span>
       <span>${r.updated_by_email
-        ? `Last edited by <b style="color:var(--ink-2)">${r.updated_by_name||r.updated_by_email}</b> ${ago(r.updated_at)}`
+        ? `Last edited by <b style="color:var(--ink-2)">${esc(r.updated_by_name||r.updated_by_email)}</b> ${ago(r.updated_at)}`
         : 'No edits recorded since import'}</span></div>
     <div class="dtn">
       <button class="btn gh" id="dPrev">&uarr;</button>
@@ -1388,7 +1414,7 @@ function detailView(uid){
       ${isAdmin()
         ? fieldRow(r,'opp_id','Opportunity ID',{note:'Used to match records on CRM import. Changing it creates a duplicate on the next sync.', warnNote:true})
         : `<div class="fr derived"><label>Opportunity ID</label><div class="fv">
-             <span class="num">${r.opp_id??'\u2014'}</span>
+             <span class="num">${esc(r.opp_id??'\u2014')}</span>
              <span class="lockwhy" title="This is the key CRM import matches on. Only an administrator can change it.">admin only</span>
            </div></div>`}
       ${fieldRow({...r, owner:r.owner_user_id},'owner','Owner/POC',
@@ -1422,7 +1448,7 @@ function detailView(uid){
       <div class="fr ${closed?'derived':'edit'}"><label>Outcome</label><div class="fv">
         <select id="dOutcome" style="max-width:280px"><option value="">Open</option>
           ${(REF?REF.outcomes:[]).map(o=>
-            `<option value="${o.code}" ${r.outcome&&r.outcome.toUpperCase()===o.code?'selected':''}>${o.label}</option>`).join('')}
+            `<option value="${esc(o.code)}" ${r.outcome&&r.outcome.toUpperCase()===o.code?'selected':''}>${esc(o.label)}</option>`).join('')}
         </select>${closed?'<span class="fnote" style="margin-left:10px">A closed pursuit cannot be edited. Set this back to Open to make changes.</span>':''}</div></div>
       ${fieldRow({...r, dependsOn:r.dep},'dependsOn','Depends on',
         {type:'select', blank:true,
@@ -1457,7 +1483,7 @@ function detailView(uid){
      <small>questionnaire v1 &middot; engine v0.23</small></h3>
     ${r.stage && r.stage !== 'Pre-BH' && !r.sole ? bhptwCard(uid, r) : ''}
     <div class="sc" style="border-bottom:1px solid var(--line);background:#FAFAFA">
-      <div>Pwin<b>${pwinPct(effectivePwin(r))}</b></div>
+      <div>Pwin<b>${pwinPct(r.pwin)}</b></div>
       ${r.dep?`<div>Base Pwin<b>${pwinPct(r.base_pwin)}</b></div>`:''}
       <div>Expected bidders<b>${r.sole?'1':(r.bidders??'\u2014')}</b></div>
       <div>Probabilistic revenue<b>${M(r.prob)}</b></div>
@@ -1487,7 +1513,7 @@ function detailView(uid){
         <div class="qa">${renderQ(qAnswers,qAnswers,r.type,!closed)}</div>`}
     ${r.sole ? '' : `<div class="fr edit" style="border-top:1px solid var(--line)">
        <label>Expected bidders
-         <span class="qhelp" onclick="showHelp('Bidders','')" title="What does this mean?">?</span></label>
+         <span class="qhelp" data-help="Bidders" data-help-type="" title="What does this mean?">?</span></label>
        <div class="fv"><input data-ed="bidders" type="number" min="1" max="6"
          value="${Object.prototype.hasOwnProperty.call(editBuf,'bidders')?editBuf.bidders:(r.bidders??'')}"
          ${closed?'disabled':''} style="max-width:100px"></div></div>`}
@@ -1613,7 +1639,7 @@ function detailView(uid){
   // the Scenario Sandbox's unrelated wiring, so this is scoped to the
   // detail view's own .qa container specifically, never touching
   // #sbq's separate handler. Converts the UI's spaced key ('TM 1a') to
-  // the DB code ('TM1A') the same way Sandbox's own SCORED_UI_KEYS
+  // the DB code ('TM1A') the same way Sandbox's own scoredUiKeys()
   // already does, since qBuf is keyed by DB code (what the save
   // endpoint expects), not the display key.
   $$('#pursuits .qa select[data-a]').forEach(sel=>sel.onchange=e=>{
@@ -1709,7 +1735,7 @@ async function recalculatePwin(uid){
     await loadData();               // see saveEdits' own comment on this
     selUid = uid; detailMode = true; // exact restore, same reason
     detailView(uid);
-    toast(`Recalculated (${scenario==='BASE'?'Base':'If '+oppName(r.dep)+' is won'}): `
+    toast(`Recalculated (${scenario==='BASE'?'Base':'If '+oppNameRaw(r.dep)+' is won'}): `
       + `Pwin ${pwinPct(body.pwin)}.`);
   }catch(e){ toast(`Could not reach the Pwin engine: ${e.message}`, true); }
 }
@@ -1758,11 +1784,11 @@ function bhptwCard(uid, r){
     bhptwBuf = {BASE:{}, DEPENDENT_WON:{}};
   }
   if(!BHPTW){
-    return `<div class="card" id="bhptwCard"><h3>${r.stage} assessment</h3>
+    return `<div class="card" id="bhptwCard"><h3>${esc(r.stage)} assessment</h3>
       <div class="pad">Loading\u2026</div></div>`;
   }
   if(!BHPTW.has_questionnaire){
-    return `<div class="card" id="bhptwCard"><h3>${r.stage} assessment</h3>
+    return `<div class="card" id="bhptwCard"><h3>${esc(r.stage)} assessment</h3>
       <div class="note" style="background:#FBF4E2;color:#6B5320;padding:11px 14px;
         border-left:3px solid var(--warn)">Complete the Pwin questionnaire
         before entering Black Hat or PTW data for this pursuit.</div></div>`;
@@ -1800,17 +1826,17 @@ function bhptwCard(uid, r){
 
   const depStepper = hasDep ? `<div class="note" style="background:#EAF3DE;color:#2C5209;padding:9px 14px">
       Dependent pursuit. Two assessments are required \u2014 one assuming
-      <b>${BHPTW.depends_on_name}</b> is lost, one assuming it is won.
+      <b>${esc(BHPTW.depends_on_name)}</b> is lost, one assuming it is won.
       <div style="margin-top:7px">
         <button class="btn ${scenario==='BASE'?'':'gh'}" id="bhStepBase" style="padding:2px 9px;font-size:11px">
           Base (no lift)${doneBase?' \u2713':''}</button>
         <button class="btn ${scenario==='DEPENDENT_WON'?'':'gh'}" id="bhStepDep" style="padding:2px 9px;font-size:11px">
-          If ${BHPTW.depends_on_name} is won${doneDep?' \u2713':''}</button>
+          If ${esc(BHPTW.depends_on_name)} is won${doneDep?' \u2713':''}</button>
       </div></div>` : '';
 
   const blackHatFields = bhptwMode==='BLACK_HAT' ? bhRow('Price aggressiveness (P1)',
       `<select id="bhP1">${(REF&&REF.p1_options||[]).map(o=>
-        `<option value="${o.code}" ${val('aggressiveness_option_code')===o.code?'selected':''}>${o.label}</option>`
+        `<option value="${esc(o.code)}" ${val('aggressiveness_option_code')===o.code?'selected':''}>${esc(o.label)}</option>`
       ).join('')}</select>`,
       'Fee = the contract type\u2019s nominal rate plus this option\u2019s delta \u2014 computed on save.') : '';
 
@@ -1819,7 +1845,7 @@ function bhptwCard(uid, r){
     + bhRow('Bid price', moneyInput('bhBidPrice', val('bid_price')), '') : '';
 
   const common = bhRow('Investment', moneyInput('bhInvestment', val('investment')), '')
-    + bhRow('Date completed', `<input id="bhCompleted" type="date" value="${val('completed_date')||''}">`, '')
+    + bhRow('Date completed', `<input id="bhCompleted" type="date" value="${esc(val('completed_date')||'')}">`, '')
     + bhRow('Predicted Pwin', pctInput('bhPwin', val('base_pwin'), {max:100}),
         'Typed directly \u2014 this phase\u2019s Pwin comes from the analysis, not the engine.');
 
@@ -1827,7 +1853,7 @@ function bhptwCard(uid, r){
     ? `Save ${scenario==='BASE'?'base':'dependent-won'} assessment`
     : 'Save assessment';
 
-  return `<div class="card" id="bhptwCard"><h3>${r.stage} assessment</h3>
+  return `<div class="card" id="bhptwCard"><h3>${esc(r.stage)} assessment</h3>
     ${depStepper}
     ${modeRow}
     ${blackHatFields}
@@ -2029,7 +2055,7 @@ function vStaffing(){
       <div class="s">${peakM}</div></div>
     <div class="kpi"><div class="k">Highest single category</div>
       <div class="v num">${topCat.peak.toFixed(1)}</div>
-      <div class="s">${topCat.c}${topCat.peakMonth?` \u00b7 ${topCat.peakMonth}`:''}</div></div>
+      <div class="s">${esc(topCat.c)}${topCat.peakMonth?` \u00b7 ${topCat.peakMonth}`:''}</div></div>
     <div class="kpi" style="grid-column:span 2">
       <div class="k">Total effort by year <span style="font-weight:400;text-transform:none;letter-spacing:0">(FTE-months)</span></div>
       <div style="display:flex;gap:16px;margin-top:6px;flex-wrap:wrap">${
@@ -2043,7 +2069,7 @@ function vStaffing(){
   <div class="card"><h3>Labor category by month <small>FTE \u00b7 peak row at foot</small></h3>
    <div class="tw staff-scroll"><table class="staff-tbl"><thead><tr><th style="position:sticky;left:0;background:#EDEDED;z-index:2">Labor category</th>
      ${months.map(m=>`<th class="r">${shortMonth(m)}</th>`).join('')}<th class="r">Peak</th><th class="r">Total</th></tr></thead>
-   <tbody>${s.cats.map(c=>`<tr><td style="position:sticky;left:0;background:#fff">${c}</td>
+   <tbody>${s.cats.map(c=>`<tr><td style="position:sticky;left:0;background:#fff">${esc(c)}</td>
      ${demand[c].map(v=>`<td class="r num"><span class="heat" style="${heat(v)}">${v>0?v.toFixed(1):'\u00b7'}</span></td>`).join('')}
      <td class="r num"><b>${Math.max(...demand[c]).toFixed(1)}</b></td>
      <td class="r num">${demand[c].reduce((a,b)=>a+b,0).toFixed(0)}</td></tr>`).join('')}
@@ -2110,21 +2136,21 @@ function vBP(){
   <div class="card"><h3>Largest B&amp;P commitments <small>top 12 open pursuits</small></h3>
    <div class="tw"><table><thead><tr><th>Opportunity name</th><th>Market</th><th class="r">Award value</th>
      <th class="r">B&amp;P required</th><th class="r">B&amp;P as % of value</th><th class="r">Pwin</th></tr></thead>
-   <tbody>${top.map(r=>`<tr class="click${depRow(r.uid)}" data-uid="${r.uid}"><td><b>${r.name}</b>${depMark(r.uid)}</td><td>${r.market}</td><td class="r num">${money(r.value)}</td>
+   <tbody>${top.map(r=>`<tr class="click${depRow(r.uid)}" data-uid="${esc(r.uid)}"><td><b>${esc(r.name)}</b>${depMark(r.uid)}</td><td>${esc(r.market)}</td><td class="r num">${money(r.value)}</td>
      <td class="r num">${money(r.bp)}</td><td class="r num">${r.value?(r.bp/r.value*100).toFixed(2):'\u2014'}%</td>
-     <td class="r">${pwinCell(effectivePwin(r))}</td></tr>`).join('')}</tbody></table></div></div>
+     <td class="r">${pwinCell(r.pwin)}</td></tr>`).join('')}</tbody></table></div></div>
   <div class="card"><h3>Largest investment commitments
      <small>${inv.length} pursuits carrying investment &middot; ${M(invTot)} of ${M(invBud)} budgeted</small></h3>
    <div class="tw"><table><thead><tr><th>Opportunity name</th><th>Market</th><th>Opportunity type</th>
      <th class="r">Award value</th><th class="r">Invest %</th><th class="r">Investment</th>
      <th class="r">Pwin</th><th class="r">$ per Pwin point</th></tr></thead>
-   <tbody>${inv.length?inv.map(r=>`<tr class="click${depRow(r.uid)}" data-uid="${r.uid}">
-     <td><b>${r.name}</b>${depMark(r.uid)}</td><td>${r.market}</td>
-     <td style="font-size:11px;color:var(--ink-2)">${(r.type||'\u2014').slice(0,38)}</td>
+   <tbody>${inv.length?inv.map(r=>`<tr class="click${depRow(r.uid)}" data-uid="${esc(r.uid)}">
+     <td><b>${esc(r.name)}</b>${depMark(r.uid)}</td><td>${esc(r.market)}</td>
+     <td style="font-size:11px;color:var(--ink-2)">${esc((r.type||'\u2014').slice(0,38))}</td>
      <td class="r num">${money(r.value)}</td>
      <td class="r num">${r.invpct==null?'\u2014':(r.invpct*100).toFixed(1)+'%'}</td>
      <td class="r num">${money(r.inv)}</td>
-     <td class="r">${pwinCell(effectivePwin(r))}</td>
+     <td class="r">${pwinCell(r.pwin)}</td>
      <td class="r num">${r.pwin?money(r.inv/(r.pwin*100)):'\u2014'}</td></tr>`).join('')
      :'<tr><td colspan="8" style="color:#888;padding:14px">No pursuits carry investment.</td></tr>'}
    </tbody><tfoot><tr><td>Total &middot; all investment pursuits</td><td colspan="2"></td>
@@ -2273,7 +2299,7 @@ function vTargets(){
         <select id="tgBuPicker" data-bu-picker>
           <option value="">Choose a business unit\u2026</option>
           ${D.target_org_nodes.map(n=>
-            `<option value="${n.id}">${n.name} (${n.code})</option>`).join('')}
+            `<option value="${esc(n.id)}">${esc(n.name)} (${esc(n.code)})</option>`).join('')}
         </select>
       </div></div>`;
     $('#tgBuPicker').onchange = e=>{
@@ -2289,7 +2315,7 @@ function vTargets(){
   const scopeBanner = multiScope ? `<div class="pad" style="display:flex;
     align-items:center;gap:10px;border-bottom:1px solid var(--line)">
     <span style="font-size:11px;color:#888">Viewing</span>
-    <b id="tgScopeName">${selectedTargetOrgNode.name} (${selectedTargetOrgNode.code})</b>
+    <b id="tgScopeName">${esc(selectedTargetOrgNode.name)} (${esc(selectedTargetOrgNode.code)})</b>
     <a href="#" id="tgChangeScope" style="font-size:12px">Change</a>
     </div>` : '';
   const wireChangeScope = ()=>{
@@ -2410,15 +2436,15 @@ function vSandbox(){
    <tbody>${P.filter(x=>!x.outcome).map(x=>{const s=SB[x.uid];
      const nch=Object.keys(x.answers||{}).filter(k=>s.ans[k]!==(x.answers||{})[k]).length;
      return `<tr class="${x.uid===sbSel?'sel ':''}${depRow(x.uid).trim()}${s.inc?'':' nobid'}">
-     <td class="r"><label class="tg"><input type="checkbox" data-u="${x.uid}" class="sbIn"
+     <td class="r"><label class="tg"><input type="checkbox" data-u="${esc(x.uid)}" class="sbIn"
        ${s.inc?'checked':''}><span></span></label></td>
-     <td><b>${x.name}</b>${depMark(x.uid)}</td><td>${x.market}</td>
+     <td><b>${esc(x.name)}</b>${depMark(x.uid)}</td><td>${esc(x.market)}</td>
      <td class="r num">${money(x.value)}</td>
      <td class="r num">${s.inc?money(yearOf(x,i0).bp):'<span style="color:#888">\u2014</span>'}</td>
      <td class="r num">${nch?`<span class="chg up2">${nch}</span>`:'\u2014'}</td>
      <td class="r num">${s.dirty?'<span style="color:#8A6A17">recalculate</span>':pwinPct(s.pwin)}</td>
      <td class="r num">${money(yearOf(x,i0).rev*(x.pwin?(s.pwin/x.pwin):1)*(s.inc?1:0))}</td>
-     <td class="r"><button class="btn gh" data-q="${x.uid}" style="padding:2px 8px;font-size:11px">Answers</button></td></tr>`;}).join('')}
+     <td class="r"><button class="btn gh" data-q="${esc(x.uid)}" style="padding:2px 8px;font-size:11px">Answers</button></td></tr>`;}).join('')}
    </tbody><tfoot><tr><td class="r num">${inc.length}</td><td>Scenario total</td><td></td>
      <td class="r num">${money(sum(inc,x=>x.value))}</td><td colspan="5"></td>
      <td class="r num">${money(by[i0].rev)}</td><td></td></tr></tfoot></table></div>
@@ -2437,12 +2463,19 @@ function vSandbox(){
     vSandbox(); if(sbSel) sbQ(sbSel);};
   if(sbSel)sbQ(sbSel);
 }
-const SCORED_UI_KEYS=['TM 1a','TM 1b','TM 2','TM 3','TM 4','TM 5','PP 1','P 1'];
+// Sourced from REF.scored_question_codes (GET /api/reference), not a
+// second hardcoded list -- the backend's own scoring.scored_question_
+// codes() is the single source now; this just maps its DB-style codes
+// ('TM1A') to the UI's spaced display key ('TM 1a') via QID_TO_KEY.
+function scoredUiKeys(){
+  const codes=(REF&&REF.scored_question_codes)||[];
+  return codes.map(c=>QID_TO_KEY[c.toLowerCase()]).filter(Boolean);
+}
 async function sbRecalcOne(uid){
   const x=P.find(p=>p.uid===uid), s=SB[uid];
   if(!x||!s) return;
   const answers={};
-  SCORED_UI_KEYS.forEach(k=>{ if(s.ans[k]) answers[k.replace(/\s+/g,'').toUpperCase()]=s.ans[k]; });
+  scoredUiKeys().forEach(k=>{ if(s.ans[k]) answers[k.replace(/\s+/g,'').toUpperCase()]=s.ans[k]; });
   try{
     const res=await fetch(`/api/pursuits/${x.id}/recalculate/preview`,{
       method:'POST', credentials:'same-origin',
@@ -2473,10 +2506,10 @@ function sbQ(uid){
   if(!REF){ loadReference().then(()=>sbQ(uid)).catch(e=>toast(e.message,true)); return; }
   const kids=DEPENDENTS[uid]||[], parent=DEPS_OF[uid];
   const nch=Object.keys(x.answers).filter(k=>s.ans[k]!==x.answers[k]).length;
-  $('#sbq').innerHTML=`<div class="card"><h3>Pwin questionnaire \u2014 ${x.name}
-     <small>${x.type||''} \u00b7 ${x.bidders??'?'} bidders</small></h3>
+  $('#sbq').innerHTML=`<div class="card"><h3>Pwin questionnaire \u2014 ${esc(x.name)}
+     <small>${esc(x.type||'')} \u00b7 ${esc(x.bidders??'?')} bidders</small></h3>
    <div class="sc" style="border-bottom:1px solid var(--line);background:#FAFAFA">
-     <div>Current Pwin<b>${pwinPct(effectivePwin(x))}</b></div>
+     <div>Current Pwin<b>${pwinPct(x.pwin)}</b></div>
      <div>Scenario Pwin<b>${s.dirty?'recalculate':pwinPct(s.pwin)}</b></div>
      <div>Answers changed<b>${nch}</b></div>
      <div>Bidders<b>${x.bidders??'\u2014'}</b></div>
@@ -2626,7 +2659,7 @@ function emptyState(){
   const who = D.user ? D.user.email : 'your account';
   const html = `<div class="card"><h3>Nothing in scope</h3>
     <div class="pad">
-      <p style="margin-top:0">There are no pursuits visible to <b>${who}</b>.</p>
+      <p style="margin-top:0">There are no pursuits visible to <b>${esc(who)}</b>.</p>
       <p>This is not an error. Access is scoped to a place in the
          organisation, and the business unit or division assigned to this
          account does not hold any pursuits yet.</p>
@@ -2655,6 +2688,27 @@ function show(v){cur=v;
   document.querySelector(`#nav a[data-v="${v}"]`).classList.add('on');
   $('#title').textContent=TITLES[v];tools(v);window.scrollTo(0,0);}
 $$('#nav a').forEach(a=>a.onclick=()=>{presenceStop();show(a.dataset.v);});
+/* ONE delegated handler for every control that used to carry an inline
+   onclick="..." attribute in a rendered HTML string (the dashboard
+   summary links, the "Clear filter" button, every questionnaire "?"
+   help marker). Inline handler attributes cannot execute under the
+   Content-Security-Policy main.py now sends (script-src is nonce-only,
+   no 'unsafe-inline'), and that policy is the backstop for any escaping
+   site ever missed -- so the app's OWN behaviour has to live here, as
+   data-* attributes plus this listener, not as attribute strings. The
+   data-go payloads are literal JSON written in this file, never user
+   data. Delegated from document once, so it survives every innerHTML
+   re-render this app's views do. */
+document.addEventListener('click', e=>{
+  const go = e.target.closest('[data-go]');
+  if(go){ e.preventDefault(); goToPursuits(JSON.parse(go.dataset.go)); return; }
+  const sh = e.target.closest('[data-show]');
+  if(sh){ e.preventDefault(); show(sh.dataset.show); return; }
+  const cf = e.target.closest('[data-clear-filter]');
+  if(cf){ dashFilterNote=''; FLT={market:'',stage:'',bid:'',outcome:'',dep:'',q:'',pwin:'',dueYear:'',sole:''}; vPursuits(); return; }
+  const hp = e.target.closest('[data-help]');
+  if(hp){ showHelp(hp.dataset.help, hp.dataset.helpType||''); }
+});
 window.addEventListener('beforeunload', presenceStop);
 
 /* ---------- bid toggle: stop the page from scrolling on click ----------
@@ -2712,8 +2766,8 @@ window.showHelp = function(code, type){
   if(!Array.isArray(e)) e = e[isProd(type) ? 'PRODUCT' : 'SERVICES'];
   const box = document.createElement('div');
   box.className = 'helpbox';
-  box.innerHTML = `<div class="inner"><h4>${e[0]}</h4>
-    <div class="body2">${e[1].replace(/</g,'&lt;')}</div>
+  box.innerHTML = `<div class="inner"><h4>${esc(e[0])}</h4>
+    <div class="body2">${esc(e[1])}</div>
     <div class="ft"><button class="btn" id="helpClose">Close</button></div></div>`;
   document.body.appendChild(box);
   const close=()=>box.remove();
@@ -2791,8 +2845,8 @@ function fieldRow(r, key, label, opts){
   const why = opts.forceEditable ? null : (opts.lockedWhy || DERIVED_WHY[key]);
   if(why){
     return `<div class="fr derived"><label>${label}</label>
-      <div class="fv">${opts.fmt ? opts.fmt(val) : (val ?? '\u2014')}
-        <span class="lockwhy" title="${why}">derived</span></div></div>`;
+      <div class="fv">${opts.fmt ? opts.fmt(val) : esc(val ?? '\u2014')}
+        <span class="lockwhy" title="${esc(why)}">derived</span></div></div>`;
   }
   // editBuf is keyed by API field name; the row knows its UI name. One map,
   // consulted in both directions, so a rename cannot desynchronise them.
@@ -2804,8 +2858,8 @@ function fieldRow(r, key, label, opts){
     input = `<select data-ed="${key}">
       ${opts.blank ? `<option value="">\u2014</option>` : ''}
       ${(opts.options||[]).map(o=>
-        `<option value="${o.code}" ${String(shown)===String(o.code)?'selected':''}
-          >${o.label}</option>`).join('')}</select>`;
+        `<option value="${esc(o.code)}" ${String(shown)===String(o.code)?'selected':''}
+          >${esc(o.label)}</option>`).join('')}</select>`;
   } else if(opts.type === 'bool'){
     input = `<label class="tg"><input type="checkbox" data-ed="${key}"
       ${shown?'checked':''}><span></span></label>`;
@@ -2813,7 +2867,7 @@ function fieldRow(r, key, label, opts){
     const raw = `<input data-ed="${key}" type="${opts.type||'text'}"
       ${opts.step?`step="${opts.step}"`:''} ${opts.min!=null?`min="${opts.min}"`:''}
       ${opts.max!=null?`max="${opts.max}"`:''}
-      value="${shown==null?'':String(shown).replace(/"/g,'&quot;')}">`;
+      value="${shown==null?'':esc(shown)}">`;
     // A currency or percentage box should say so. Cheaper and less
     // error-prone than formatting the value itself, which fights the
     // number input on every keystroke.
@@ -2959,12 +3013,12 @@ function fmtVal(v, field){
   if(v===null||v===undefined) return '<i>empty</i>';
   if(typeof v==='boolean') return v?'Yes':'No';
   const s=String(v);
-  if(ID_FIELDS.has(field)) return s;
+  if(ID_FIELDS.has(field)) return esc(s);
   if(typeof v==='number') return v.toLocaleString('en-US');
   if(/^\d{4}-\d{2}-\d{2}T/.test(s)) return s.slice(0,16).replace('T',' ');
   if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   if(/^-?\d+(\.\d+)?$/.test(s)) return (+s).toLocaleString('en-US');
-  return s;
+  return esc(s);   // audit values are user data (a pursuit's old/new name, an email)
 }
 function formatDiff(changed){
   if(!changed) return '<span style="color:#888">no detail</span>';
@@ -3006,7 +3060,7 @@ async function presenceStart(pursuitId){
       if(others && others.length){
         el.className = 'presence show';
         el.innerHTML = others.map(o=>
-          `<b>${o.display_name||o.email}</b> also has this open
+          `<b>${esc(o.display_name||o.email)}</b> also has this open
            (since ${ago(o.opened_at)})`).join(' &middot; ') +
           ` &mdash; your changes will be checked against theirs when you save.`;
       } else { el.className='presence'; el.innerHTML=''; }
@@ -3127,13 +3181,13 @@ async function loadHistory(pursuitId, uid){
         <th style="width:150px">When</th><th style="width:170px">Who</th>
         <th>Change</th></tr></thead><tbody>` +
       rows.map(h=>`<tr>
-        <td class="num" title="${h.occurred_at}">${ago(h.occurred_at)}</td>
-        <td>${h.actor_name || h.actor || '<i>system</i>'}</td>
+        <td class="num" title="${esc(h.occurred_at)}">${ago(h.occurred_at)}</td>
+        <td>${(h.actor_name || h.actor) ? esc(h.actor_name || h.actor) : '<i>system</i>'}</td>
         <td>${formatDiff(h.changed_fields)}</td></tr>`).join('') +
       `</tbody></table></div>`;
   }catch(e){
     historyUid = null;  // do not carry a failed load forward as if it were real
-    el.innerHTML = `<div class="note">Could not load history: ${e.message}</div>`;
+    el.innerHTML = `<div class="note">Could not load history: ${esc(e.message)}</div>`;
   }
 }
 
@@ -3309,9 +3363,9 @@ async function loadData(){
   rebuildDerived();
   const ft = document.querySelector('.side-ft');
   if(ft){
-    ft.innerHTML = `${(D.client&&D.client.name)||''}` +
+    ft.innerHTML = `${esc((D.client&&D.client.name)||'')}` +
       `<span id="pyLbl">Planning year ${PY}</span>` +
-      `<span style="color:#6E6E6E">${D.user?D.user.email:''}</span>` +
+      `<span style="color:#6E6E6E">${esc(D.user?D.user.email:'')}</span>` +
       `<button class="btn gh" id="signOut">Sign out</button>`;
     $('#signOut').onclick = async ()=>{
       await fetch('/api/logout',{method:'POST',credentials:'same-origin'});
@@ -3387,7 +3441,7 @@ function showLoadError(msg){
   restoreViewContainers();
   const el = document.getElementById('dash');
   const html = `<div class="card"><h3>Could not load the portfolio</h3>
-     <div class="note">${msg}</div></div>`;
+     <div class="note">${esc(msg)}</div></div>`;
   if(el){ el.innerHTML = html; show('dash'); }
   else { document.querySelector('.body').innerHTML = html; }
 }

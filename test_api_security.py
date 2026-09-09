@@ -1031,29 +1031,43 @@ def main():
         db.commit()
 
     print("\n=== 16. dashboard layout: per-user, not per-tenant ===")
-    r = safe(A.put, "/api/dashboard-layout", json={"card_order": []})
+    # DZ (aero.buz@demoaero.test), not A -- A is the real aero.admin
+    # account, the same one manual/demo usage logs in as. This section
+    # writes AND deletes user_dashboard_layout rows; running it against A
+    # was destroying that real account's real saved dashboard preference
+    # on every single run of this suite (confirmed live before this fix:
+    # a real preference set for A did not survive one run). DZ is this
+    # same file's own existing dedicated test-fixture user (created
+    # idempotently above, is_test_fixture=true org node) -- writing to
+    # and deleting ITS dashboard-layout row is exactly what a test
+    # fixture is for. PUT /api/dashboard-layout has no role/scope gate
+    # ("any authenticated user"), so DZ works here regardless of its own
+    # narrow (empty-BU) scope. N remains the "different user in the same
+    # tenant" observer below -- this section never writes to N, only
+    # reads, so N's own real row (if any) was never at risk either way.
+    r = safe(DZ.put, "/api/dashboard-layout", json={"card_order": []})
     check("an empty card_order is rejected",
           r.status_code == 422, f"got {r.status_code}: {r.text[:150]}")
 
-    r = safe(A.put, "/api/dashboard-layout",
+    r = safe(DZ.put, "/api/dashboard-layout",
             json={"card_order": ["outcomes", "revenue", "outcomes"]})
     check("a card_order with duplicates is rejected",
           r.status_code == 422, f"got {r.status_code}: {r.text[:150]}")
 
-    r = safe(A.put, "/api/dashboard-layout",
+    r = safe(DZ.put, "/api/dashboard-layout",
             json={"card_order": ["outcomes", "revenue", "summary"]})
     check("PUT as any authenticated user succeeds (no role gate -- "
           "this is personal UI state, same category as DASH_CFG "
           "show/hide, not a privileged action)",
           r.status_code == 200, f"got {r.status_code}: {r.text[:150]}")
 
-    r = safe(A.get, "/api/bootstrap")
-    check("GET /api/bootstrap echoes A's own saved order back",
+    r = safe(DZ.get, "/api/bootstrap")
+    check("GET /api/bootstrap echoes DZ's own saved order back",
           (r.json() or {}).get("dashboard_layout") ==
           ["outcomes", "revenue", "summary"], f"got {r.text[:200]}")
 
     r = safe(N.get, "/api/bootstrap")
-    check("a DIFFERENT user in the SAME tenant (N) is unaffected by A's "
+    check("a DIFFERENT user in the SAME tenant (N) is unaffected by DZ's "
           "reorder -- dashboard_layout is per-user, not a tenant-wide "
           "default",
           (r.json() or {}).get("dashboard_layout") is None,
@@ -1063,11 +1077,13 @@ def main():
         rows = db.execute("""
             SELECT u.email, l.card_order FROM user_dashboard_layout l
               JOIN app_user u ON u.id = l.user_id
-             WHERE u.email IN (%s, %s)""", (args.user_a, args.user_narrow)).fetchall()
+             WHERE u.email IN (%s, %s)""",
+            ("aero.buz@demoaero.test", args.user_narrow)).fetchall()
     by_email = {row["email"]: row["card_order"] for row in rows}
-    check("only A's row was written -- N was never given one just by "
+    check("only DZ's row was written -- N was never given one just by "
           "being on the same tenant",
-          by_email.get(args.user_a) == ["outcomes", "revenue", "summary"]
+          by_email.get("aero.buz@demoaero.test") ==
+          ["outcomes", "revenue", "summary"]
           and args.user_narrow not in by_email,
           f"got {by_email}")
 
@@ -1076,19 +1092,19 @@ def main():
           "all -- known gap since v0.6.0 ===")
     settings_a = {"outcomes": {"on": False, "type": "table"},
                   "revenue": {"on": True, "type": "bar"}}
-    r = safe(A.put, "/api/dashboard-layout",
+    r = safe(DZ.put, "/api/dashboard-layout",
             json={"card_order": ["outcomes", "revenue", "summary"],
                   "card_settings": settings_a})
     check("PUT with card_settings alongside card_order succeeds",
           r.status_code == 200, f"got {r.status_code}: {r.text[:150]}")
 
-    r = safe(A.get, "/api/bootstrap")
-    check("GET /api/bootstrap echoes A's own saved card_settings back",
+    r = safe(DZ.get, "/api/bootstrap")
+    check("GET /api/bootstrap echoes DZ's own saved card_settings back",
           (r.json() or {}).get("dashboard_settings") == settings_a,
           f"got {r.text[:200]}")
 
     r = safe(N.get, "/api/bootstrap")
-    check("a DIFFERENT user in the SAME tenant (N) is unaffected by A's "
+    check("a DIFFERENT user in the SAME tenant (N) is unaffected by DZ's "
           "card_settings -- per-user, not a tenant-wide default, same "
           "as card_order",
           (r.json() or {}).get("dashboard_settings") is None,
@@ -1098,24 +1114,27 @@ def main():
         rows = db.execute("""
             SELECT u.email, l.card_settings FROM user_dashboard_layout l
               JOIN app_user u ON u.id = l.user_id
-             WHERE u.email IN (%s, %s)""", (args.user_a, args.user_narrow)).fetchall()
+             WHERE u.email IN (%s, %s)""",
+            ("aero.buz@demoaero.test", args.user_narrow)).fetchall()
     settings_by_email = {row["email"]: row["card_settings"] for row in rows}
-    check("only A's row carries card_settings -- N was never given one",
-          settings_by_email.get(args.user_a) == settings_a
+    check("only DZ's row carries card_settings -- N was never given one",
+          settings_by_email.get("aero.buz@demoaero.test") == settings_a
           and args.user_narrow not in settings_by_email,
           f"got {settings_by_email}")
 
-    r = safe(A.put, "/api/dashboard-layout",
+    r = safe(DZ.put, "/api/dashboard-layout",
             json={"card_order": ["outcomes"],
                   "card_settings": {"x": {"on": "not-a-bool", "type": "bar"}}})
     check("a non-boolean 'on' in card_settings is rejected",
           r.status_code == 422, f"got {r.status_code}: {r.text[:150]}")
 
+    # Cleanup targets DZ's own row ONLY -- a genuine test fixture, safe
+    # to reset on every run, unlike a real named account's real data.
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         db.execute("""
             DELETE FROM user_dashboard_layout
              WHERE user_id IN (SELECT id FROM app_user WHERE email = %s)""",
-            (args.user_a,))
+            ("aero.buz@demoaero.test",))
         db.commit()
 
     print(f"\n{'='*58}")

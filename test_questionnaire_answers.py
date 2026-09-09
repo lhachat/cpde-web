@@ -98,6 +98,42 @@ def current_answers(db, pursuit_id, scenario="BASE"):
     return {r["code"]: r["label_text"] for r in rows}
 
 
+def restore_answer(db, pursuit_id, scenario, code, label):
+    """Direct-SQL restore of one question's answer on the pursuit's
+    CURRENT QUESTIONNAIRE assessment for this scenario. Used ONLY from
+    finally blocks: a crash partway through this test may mean the real
+    PATCH .../answers write path was never reached for the restore step
+    that would otherwise have run on the happy path, so this does not
+    depend on any earlier step having succeeded -- it reads whatever
+    QUESTIONNAIRE row is current right now (the same "latest
+    QUESTIONNAIRE row" resolution current_answers() itself uses) and
+    writes directly onto it. label=None clears the answer, matching
+    PATCH .../answers' own null-clears-an-option-answer semantics."""
+    a = db.execute("""
+        SELECT id FROM pwin_assessment
+         WHERE pursuit_id = %s AND scenario = %s AND assessment_type = 'QUESTIONNAIRE'
+         ORDER BY calculated_at DESC LIMIT 1""", (pursuit_id, scenario)).fetchone()
+    if not a:
+        return
+    q = db.execute("SELECT id FROM question WHERE code = %s", (code,)).fetchone()
+    if not q:
+        return
+    if label is None:
+        db.execute("DELETE FROM pwin_answer WHERE pwin_assessment_id = %s AND question_id = %s",
+                   (a["id"], q["id"]))
+        return
+    opt = db.execute("SELECT id FROM question_option WHERE question_id = %s AND label_text = %s",
+                     (q["id"], label)).fetchone()
+    if not opt:
+        return
+    db.execute("""
+        INSERT INTO pwin_answer (pwin_assessment_id, question_id, question_option_id)
+        VALUES (%s,%s,%s)
+        ON CONFLICT (pwin_assessment_id, question_id)
+        DO UPDATE SET question_option_id = EXCLUDED.question_option_id""",
+        (a["id"], q["id"], opt["id"]))
+
+
 def current_numeric_answers(db, pursuit_id, scenario="BASE"):
     """Same as current_answers, but for numeric_value-typed answers
     (INVEST_PCT) that current_answers' own label_text join always shows
@@ -159,263 +195,316 @@ def main():
     A = login(args.base, "aero.admin@demoaero.test")
     B = login(args.base, "demo.admin@democlient.test")
 
-    # ---- 1. a valid answer persists ------------------------------------
-    print("=== 1. a valid answer change persists ===")
+    # Every "before" snapshot this test needs to restore FROM, captured
+    # up front -- before any mutation -- so the finally block below can
+    # restore every touched fixture directly via SQL regardless of where
+    # in the try block a failure happens. Real incident this guards
+    # against: a mid-test crash previously left a real pursuit's answers
+    # changed with no restore ever attempted (no finally existed at all).
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         before = current_answers(db, p1108["id"])
-    original_tm1a = before.get("TM1A")
-    new_tm1a = "Better" if original_tm1a != "Better" else "Worse"
-    r = safe(A.patch, f"/api/pursuits/{p1108['id']}/answers",
-             json={"answers": {"TM1A": new_tm1a}})
-    check("PATCH with a valid answer succeeds", r.status_code == 200,
-          f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        after = current_answers(db, p1108["id"])
-    check("the new answer actually landed in the database",
-          after.get("TM1A") == new_tm1a, f"got {after.get('TM1A')}")
-    check("other answers on the same assessment were untouched",
-          {k: v for k, v in after.items() if k != "TM1A"} ==
-          {k: v for k, v in before.items() if k != "TM1A"},
-          f"before={before}, after={after}")
-
-    # ---- 2. an invalid answer value is rejected ------------------------
-    print("\n=== 2. an invalid answer value is rejected ===")
-    r = safe(A.patch, f"/api/pursuits/{p1108['id']}/answers",
-             json={"answers": {"TM1A": "Not a real option"}})
-    check("PATCH with a nonexistent answer value is rejected",
-          r.status_code == 400, f"got {r.status_code}: {r.text}")
-    r = safe(A.patch, f"/api/pursuits/{p1108['id']}/answers",
-             json={"answers": {"NOT_A_QUESTION": "x"}})
-    check("PATCH with an unknown question code is rejected",
-          r.status_code == 422, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        after_rejected = current_answers(db, p1108["id"])
-    check("the rejected values were never written",
-          after_rejected.get("TM1A") == new_tm1a, f"got {after_rejected}")
-
-    # restore 1108's TM1a to its original value
-    r = safe(A.patch, f"/api/pursuits/{p1108['id']}/answers",
-             json={"answers": {"TM1A": original_tm1a}})
-    check("restoring TM1a to its original value succeeds",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
-
-    # ---- 3. out-of-scope (cross-tenant) write is rejected --------------
-    print("\n=== 3. a cross-tenant write is rejected, not silently "
-          "accepted ===")
-    r = safe(B.patch, f"/api/pursuits/{p1108['id']}/answers",
-             json={"answers": {"TM1A": "Worse"}})
-    check("DEMO's session cannot write AERO's pursuit (404, not 403 -- "
-          "same convention as every other scope check in this app)",
-          r.status_code == 404, f"got {r.status_code}: {r.text}")
-
-    # ---- 4. the write is audited ---------------------------------------
-    print("\n=== 4. the write is audited ===")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        hist = db.execute("""
-            SELECT changed_fields FROM audit_log
-             WHERE table_name = 'pwin_answer' AND occurred_at > now() - interval '2 minutes'
-             ORDER BY occurred_at DESC LIMIT 5""").fetchall()
-    check("recent pwin_answer changes appear in audit_log (the existing "
-          "generic trigger -- no new audit mechanism was needed)",
-          len(hist) > 0, f"got {hist}")
-
-    # ---- 5. illegal cascade combination: confirmed gap, now rejected ---
-    print("\n=== 5. an illegal TM2/TM3 cascade combination is rejected "
-          "server-side (previously enforced ONLY client-side) ===")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         before_1060 = current_answers(db, p1060["id"])
-    check("1060's fixture TM2/TM3 are the expected known pair",
-          before_1060.get("TM2") == "Yes, one of the competitors"
-          and before_1060.get("TM3") ==
-          "Incumbent competitor is performing satisfactorily/unknown",
-          f"got {before_1060}")
-
-    r = safe(A.patch, f"/api/pursuits/{p1060['id']}/answers",
-             json={"answers": {"TM2": "No"}})
-    check("changing TM2 to 'No' while TM3 stays a competitor-incumbent "
-          "answer (illegal under the tm2_to_tm3 cascade -- 'No' only "
-          "allows 'N/A') is rejected",
-          r.status_code == 400, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        after_1060 = current_answers(db, p1060["id"])
-    check("the rejected illegal combination was never written",
-          after_1060 == before_1060, f"got {after_1060}")
-
-    r = safe(A.patch, f"/api/pursuits/{p1060['id']}/answers",
-             json={"answers": {"TM2": "No", "TM3": "N/A"}})
-    check("the SAME TM2 change, with TM3 also corrected to the one "
-          "legal option, succeeds", r.status_code == 200,
-          f"got {r.status_code}: {r.text}")
-
-    # restore 1060's TM2/TM3 to original
-    r = safe(A.patch, f"/api/pursuits/{p1060['id']}/answers",
-             json={"answers": {"TM2": before_1060["TM2"],
-                              "TM3": before_1060["TM3"]}})
-    check("restoring 1060's TM2/TM3 to their original values succeeds",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        restored_1060 = current_answers(db, p1060["id"])
-    check("1060 fully restored", restored_1060 == before_1060,
-          f"got {restored_1060}")
-
-    # ---- 6. DEPENDENT_WON without a dependency is rejected -------------
-    print("\n=== 6. DEPENDENT_WON scenario requires a real dependency ===")
-    r = safe(A.patch, f"/api/pursuits/{p_indep['id']}/answers",
-             json={"scenario": "DEPENDENT_WON", "answers": {"TM1A": "No"}})
-    check("saving a DEPENDENT_WON answer on a pursuit with no "
-          "dependency is rejected", r.status_code == 400,
-          f"got {r.status_code}: {r.text}")
-
-    # ---- 7. DEPENDENT_WON WITH a dependency: creates + persists --------
-    print("\n=== 7. DEPENDENT_WON answers persist once a dependency "
-          "exists, even with no prior DEPENDENT_WON assessment row ===")
-    r = safe(A.patch, f"/api/pursuits/{p_indep['id']}",
-             json={"depends_on_opp_id": p_target["uid"]})
-    check("setting up the fixture: giving 1042 a real dependency (1122) "
-          "succeeds", r.status_code == 200, f"got {r.status_code}: {r.text}")
-
-    r = safe(A.patch, f"/api/pursuits/{p_indep['id']}/answers",
-             json={"scenario": "DEPENDENT_WON", "answers": {"TM1A": "No"}})
-    check("PATCH with scenario=DEPENDENT_WON now succeeds (this pursuit "
-          "never had a DEPENDENT_WON assessment row before this call)",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        dep_answers = current_answers(db, p_indep["id"], "DEPENDENT_WON")
-        base_answers_untouched = current_answers(db, p_indep["id"], "BASE")
-    check("the DEPENDENT_WON answer landed on the DEPENDENT_WON scenario, "
-          "not BASE", dep_answers.get("TM1A") == "No", f"got {dep_answers}")
-    check("BASE's own TM1a was never touched by a DEPENDENT_WON save",
-          base_answers_untouched.get("TM1A") != "No" or "TM1A" not in base_answers_untouched
-          or True,  # base may legitimately also be unanswered/whatever it was
-          f"got {base_answers_untouched}")
-
-    # cleanup: clear the fixture dependency (real write path) AND the
-    # DEPENDENT_WON assessment this test fabricated -- pwin_assessment
-    # has no write endpoint that retracts one (by design: a real
-    # assessment is meant to accumulate as history, never be deleted),
-    # so a leftover fabricated-for-testing row is removed directly here
-    # rather than through a real path that does not exist. Left in
-    # place, it would trip test_integrity.py's "no DEPENDENT_WON without
-    # a dependency" check the moment the dependency above is cleared.
-    r = safe(A.patch, f"/api/pursuits/{p_indep['id']}",
-             json={"depends_on_opp_id": None})
-    check("cleanup: clearing 1042's fixture dependency succeeds",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        cleared = db.execute("SELECT depends_on_pursuit_id FROM pursuit WHERE id=%s",
-                             (p_indep["id"],)).fetchone()
-        db.execute("""
-            DELETE FROM pwin_assessment
-             WHERE pursuit_id = %s AND scenario = 'DEPENDENT_WON'""",
-            (p_indep["id"],))
-        db.commit()
-    check("1042 restored to independent", cleared["depends_on_pursuit_id"] is None,
-          f"got {cleared}")
-
-    # ---- 8. Recalculate now accepts a scenario, not just BASE ----------
-    print("\n=== 8. POST /recalculate accepts scenario, not hardcoded "
-          "to BASE any more ===")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        p2_before_recalc = current_answers(db, p1060["id"]).get("P2")
-    r = safe(A.post, f"/api/pursuits/{p1060['id']}/recalculate", json={})
-    check("an explicit {} body (scenario defaults to BASE) still works, "
-          "matching every pre-existing caller that sends no body at all",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        p2_after_recalc = current_answers(db, p1060["id"]).get("P2")
-    check("P2 (not a scored question) survives this recalculation too "
-          "-- see section 9 below for the dedicated fix/regression test",
-          p2_after_recalc == p2_before_recalc,
-          f"before={p2_before_recalc!r}, after={p2_after_recalc!r}")
-    r = safe(A.post, f"/api/pursuits/{p1060['id']}/recalculate",
-             json={"scenario": "DEPENDENT_WON"})
-    check("recalculating DEPENDENT_WON on a pursuit with no dependency "
-          "is rejected the same way saving an answer to it is",
-          r.status_code == 400, f"got {r.status_code}: {r.text}")
-    r = safe(A.post, f"/api/pursuits/{p1060['id']}/recalculate",
-             json={"scenario": "not a real scenario"})
-    check("an invalid scenario value is rejected", r.status_code == 422,
-          f"got {r.status_code}: {r.text}")
-
-    # ---- 9. Recalculate carries the FULL answer set forward, not just
-    #         the 8 scored questions -- P2 and INVEST_PCT are real,
-    #         meaningful answers that are not scored via scoring.lookup()
-    #         directly, and were confirmed live (twice, on real pursuits)
-    #         to silently vanish from the CURRENT assessment row on every
-    #         recalculation before this fix.
-    print("\n=== 9. P2 and INVEST_PCT survive a recalculation ===")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         before_1065 = current_answers(db, p1065["id"])
         before_1065_numeric = current_numeric_answers(db, p1065["id"])
-    check("1065's fixture has both a real P2 and a real, nonzero "
-          "INVEST_PCT to carry forward",
-          before_1065.get("P2") is not None
-          and before_1065_numeric.get("INVEST_PCT") not in (None, 0),
-          f"got P2={before_1065.get('P2')!r}, "
-          f"INVEST_PCT={before_1065_numeric.get('INVEST_PCT')!r}")
 
-    r = safe(A.post, f"/api/pursuits/{p1065['id']}/recalculate", json={})
-    check("recalculate succeeds", r.status_code == 200,
-          f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        after_1065 = current_answers(db, p1065["id"])
-        after_1065_numeric = current_numeric_answers(db, p1065["id"])
-    check("P2 survived the recalculation, unchanged",
-          after_1065.get("P2") == before_1065.get("P2"),
-          f"before={before_1065.get('P2')!r}, after={after_1065.get('P2')!r}")
-    check("INVEST_PCT (numeric_value, not an option -- a different "
-          "answer shape than every scored question) survived the "
-          "recalculation, unchanged",
-          after_1065_numeric.get("INVEST_PCT") == before_1065_numeric.get("INVEST_PCT"),
-          f"before={before_1065_numeric.get('INVEST_PCT')!r}, "
-          f"after={after_1065_numeric.get('INVEST_PCT')!r}")
-    check("every OTHER (scored) answer also survived, unchanged",
-          {k: v for k, v in after_1065.items() if k != "P2"} ==
-          {k: v for k, v in before_1065.items() if k != "P2"},
-          f"before={before_1065}, after={after_1065}")
+    try:
+        # ---- 1. a valid answer persists ------------------------------------
+        print("=== 1. a valid answer change persists ===")
+        original_tm1a = before.get("TM1A")
+        new_tm1a = "Better" if original_tm1a != "Better" else "Worse"
+        r = safe(A.patch, f"/api/pursuits/{p1108['id']}/answers",
+                 json={"answers": {"TM1A": new_tm1a}})
+        check("PATCH with a valid answer succeeds", r.status_code == 200,
+              f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            after = current_answers(db, p1108["id"])
+        check("the new answer actually landed in the database",
+              after.get("TM1A") == new_tm1a, f"got {after.get('TM1A')}")
+        check("other answers on the same assessment were untouched",
+              {k: v for k, v in after.items() if k != "TM1A"} ==
+              {k: v for k, v in before.items() if k != "TM1A"},
+              f"before={before}, after={after}")
 
-    # ---- 9b. a scored answer change still moves the Pwin, AND P2/
-    #          INVEST_PCT still survive THAT recalculation too -- the fix
-    #          must not have merely special-cased "nothing changed".
-    print("\n=== 9b. a scored-answer change still moves the Pwin "
-          "(no regression), and P2/INVEST_PCT survive that too ===")
-    tm1a_before = before_1065.get("TM1A")
-    new_tm1a = "Worse" if tm1a_before != "Worse" else "Better"
-    r = safe(A.patch, f"/api/pursuits/{p1065['id']}/answers",
-             json={"answers": {"TM1A": new_tm1a}})
-    check("changing TM1a succeeds", r.status_code == 200,
-          f"got {r.status_code}: {r.text}")
-    r1 = safe(A.post, f"/api/pursuits/{p1065['id']}/recalculate", json={})
-    pwin_after_change = r1.json().get("pwin") if r1.status_code == 200 else None
-    check("recalculate succeeds after the TM1a change",
-          r1.status_code == 200, f"got {r1.status_code}: {r1.text}")
+        # ---- 2. an invalid answer value is rejected ------------------------
+        print("\n=== 2. an invalid answer value is rejected ===")
+        r = safe(A.patch, f"/api/pursuits/{p1108['id']}/answers",
+                 json={"answers": {"TM1A": "Not a real option"}})
+        check("PATCH with a nonexistent answer value is rejected",
+              r.status_code == 400, f"got {r.status_code}: {r.text}")
+        r = safe(A.patch, f"/api/pursuits/{p1108['id']}/answers",
+                 json={"answers": {"NOT_A_QUESTION": "x"}})
+        check("PATCH with an unknown question code is rejected",
+              r.status_code == 422, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            after_rejected = current_answers(db, p1108["id"])
+        check("the rejected values were never written",
+              after_rejected.get("TM1A") == new_tm1a, f"got {after_rejected}")
 
-    # restore TM1a and recalculate again -- the Pwin should return to
-    # (approximately) its original value, proving the change was real
-    # and reversible, not a fluke of engine nondeterminism.
-    r = safe(A.patch, f"/api/pursuits/{p1065['id']}/answers",
-             json={"answers": {"TM1A": tm1a_before}})
-    check("restoring TM1a succeeds", r.status_code == 200,
-          f"got {r.status_code}: {r.text}")
-    r2 = safe(A.post, f"/api/pursuits/{p1065['id']}/recalculate", json={})
-    pwin_after_restore = r2.json().get("pwin") if r2.status_code == 200 else None
-    check("recalculate succeeds after restoring TM1a",
-          r2.status_code == 200, f"got {r2.status_code}: {r2.text}")
-    check("the Pwin actually moved when TM1a changed, proving this is "
-          "a real scored-answer effect, not just a P2/INVEST_PCT "
-          "carry-forward with the rest of scoring silently broken",
-          pwin_after_change is not None and pwin_after_change != pwin_after_restore,
-          f"after change={pwin_after_change}, after restore={pwin_after_restore}")
+        # restore 1108's TM1a to its original value
+        r = safe(A.patch, f"/api/pursuits/{p1108['id']}/answers",
+                 json={"answers": {"TM1A": original_tm1a}})
+        check("restoring TM1a to its original value succeeds",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
 
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        final_1065 = current_answers(db, p1065["id"])
-        final_1065_numeric = current_numeric_answers(db, p1065["id"])
-    check("P2 and INVEST_PCT (and every other answer) are back to "
-          "exactly their original values after the round trip",
-          final_1065 == before_1065
-          and final_1065_numeric.get("INVEST_PCT") == before_1065_numeric.get("INVEST_PCT"),
-          f"before={before_1065}/{before_1065_numeric}, "
-          f"final={final_1065}/{final_1065_numeric}")
+        # ---- 3. out-of-scope (cross-tenant) write is rejected --------------
+        print("\n=== 3. a cross-tenant write is rejected, not silently "
+              "accepted ===")
+        r = safe(B.patch, f"/api/pursuits/{p1108['id']}/answers",
+                 json={"answers": {"TM1A": "Worse"}})
+        check("DEMO's session cannot write AERO's pursuit (404, not 403 -- "
+              "same convention as every other scope check in this app)",
+              r.status_code == 404, f"got {r.status_code}: {r.text}")
+
+        # ---- 4. the write is audited ---------------------------------------
+        print("\n=== 4. the write is audited ===")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            hist = db.execute("""
+                SELECT changed_fields FROM audit_log
+                 WHERE table_name = 'pwin_answer' AND occurred_at > now() - interval '2 minutes'
+                 ORDER BY occurred_at DESC LIMIT 5""").fetchall()
+        check("recent pwin_answer changes appear in audit_log (the existing "
+              "generic trigger -- no new audit mechanism was needed)",
+              len(hist) > 0, f"got {hist}")
+
+        # ---- 5. illegal cascade combination: confirmed gap, now rejected ---
+        print("\n=== 5. an illegal TM2/TM3 cascade combination is rejected "
+              "server-side (previously enforced ONLY client-side) ===")
+        check("1060's fixture TM2/TM3 are the expected known pair",
+              before_1060.get("TM2") == "Yes, one of the competitors"
+              and before_1060.get("TM3") ==
+              "Incumbent competitor is performing satisfactorily/unknown",
+              f"got {before_1060}")
+
+        r = safe(A.patch, f"/api/pursuits/{p1060['id']}/answers",
+                 json={"answers": {"TM2": "No"}})
+        check("changing TM2 to 'No' while TM3 stays a competitor-incumbent "
+              "answer (illegal under the tm2_to_tm3 cascade -- 'No' only "
+              "allows 'N/A') is rejected",
+              r.status_code == 400, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            after_1060 = current_answers(db, p1060["id"])
+        check("the rejected illegal combination was never written",
+              after_1060 == before_1060, f"got {after_1060}")
+
+        r = safe(A.patch, f"/api/pursuits/{p1060['id']}/answers",
+                 json={"answers": {"TM2": "No", "TM3": "N/A"}})
+        check("the SAME TM2 change, with TM3 also corrected to the one "
+              "legal option, succeeds", r.status_code == 200,
+              f"got {r.status_code}: {r.text}")
+
+        # restore 1060's TM2/TM3 to original
+        r = safe(A.patch, f"/api/pursuits/{p1060['id']}/answers",
+                 json={"answers": {"TM2": before_1060["TM2"],
+                                  "TM3": before_1060["TM3"]}})
+        check("restoring 1060's TM2/TM3 to their original values succeeds",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            restored_1060 = current_answers(db, p1060["id"])
+        check("1060 fully restored", restored_1060 == before_1060,
+              f"got {restored_1060}")
+
+        # ---- 6. DEPENDENT_WON without a dependency is rejected -------------
+        print("\n=== 6. DEPENDENT_WON scenario requires a real dependency ===")
+        r = safe(A.patch, f"/api/pursuits/{p_indep['id']}/answers",
+                 json={"scenario": "DEPENDENT_WON", "answers": {"TM1A": "No"}})
+        check("saving a DEPENDENT_WON answer on a pursuit with no "
+              "dependency is rejected", r.status_code == 400,
+              f"got {r.status_code}: {r.text}")
+
+        # ---- 7. DEPENDENT_WON WITH a dependency: creates + persists --------
+        print("\n=== 7. DEPENDENT_WON answers persist once a dependency "
+              "exists, even with no prior DEPENDENT_WON assessment row ===")
+        r = safe(A.patch, f"/api/pursuits/{p_indep['id']}",
+                 json={"depends_on_opp_id": p_target["uid"]})
+        check("setting up the fixture: giving 1042 a real dependency (1122) "
+              "succeeds", r.status_code == 200, f"got {r.status_code}: {r.text}")
+
+        r = safe(A.patch, f"/api/pursuits/{p_indep['id']}/answers",
+                 json={"scenario": "DEPENDENT_WON", "answers": {"TM1A": "No"}})
+        check("PATCH with scenario=DEPENDENT_WON now succeeds (this pursuit "
+              "never had a DEPENDENT_WON assessment row before this call)",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            dep_answers = current_answers(db, p_indep["id"], "DEPENDENT_WON")
+            base_answers_untouched = current_answers(db, p_indep["id"], "BASE")
+        check("the DEPENDENT_WON answer landed on the DEPENDENT_WON scenario, "
+              "not BASE", dep_answers.get("TM1A") == "No", f"got {dep_answers}")
+        check("BASE's own TM1a was never touched by a DEPENDENT_WON save",
+              base_answers_untouched.get("TM1A") != "No" or "TM1A" not in base_answers_untouched
+              or True,  # base may legitimately also be unanswered/whatever it was
+              f"got {base_answers_untouched}")
+
+        # cleanup: clear the fixture dependency (real write path) AND the
+        # DEPENDENT_WON assessment this test fabricated -- pwin_assessment
+        # has no write endpoint that retracts one (by design: a real
+        # assessment is meant to accumulate as history, never be deleted),
+        # so a leftover fabricated-for-testing row is removed directly here
+        # rather than through a real path that does not exist. Left in
+        # place, it would trip test_integrity.py's "no DEPENDENT_WON without
+        # a dependency" check the moment the dependency above is cleared.
+        r = safe(A.patch, f"/api/pursuits/{p_indep['id']}",
+                 json={"depends_on_opp_id": None})
+        check("cleanup: clearing 1042's fixture dependency succeeds",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            cleared = db.execute("SELECT depends_on_pursuit_id FROM pursuit WHERE id=%s",
+                                 (p_indep["id"],)).fetchone()
+            db.execute("""
+                DELETE FROM pwin_assessment
+                 WHERE pursuit_id = %s AND scenario = 'DEPENDENT_WON'""",
+                (p_indep["id"],))
+            db.commit()
+        check("1042 restored to independent", cleared["depends_on_pursuit_id"] is None,
+              f"got {cleared}")
+
+        # ---- 8. Recalculate now accepts a scenario, not just BASE ----------
+        print("\n=== 8. POST /recalculate accepts scenario, not hardcoded "
+              "to BASE any more ===")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            p2_before_recalc = current_answers(db, p1060["id"]).get("P2")
+        r = safe(A.post, f"/api/pursuits/{p1060['id']}/recalculate", json={})
+        check("an explicit {} body (scenario defaults to BASE) still works, "
+              "matching every pre-existing caller that sends no body at all",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            p2_after_recalc = current_answers(db, p1060["id"]).get("P2")
+        check("P2 (not a scored question) survives this recalculation too "
+              "-- see section 9 below for the dedicated fix/regression test",
+              p2_after_recalc == p2_before_recalc,
+              f"before={p2_before_recalc!r}, after={p2_after_recalc!r}")
+        r = safe(A.post, f"/api/pursuits/{p1060['id']}/recalculate",
+                 json={"scenario": "DEPENDENT_WON"})
+        check("recalculating DEPENDENT_WON on a pursuit with no dependency "
+              "is rejected the same way saving an answer to it is",
+              r.status_code == 400, f"got {r.status_code}: {r.text}")
+        r = safe(A.post, f"/api/pursuits/{p1060['id']}/recalculate",
+                 json={"scenario": "not a real scenario"})
+        check("an invalid scenario value is rejected", r.status_code == 422,
+              f"got {r.status_code}: {r.text}")
+
+        # ---- 9. Recalculate carries the FULL answer set forward, not just
+        #         the 8 scored questions -- P2 and INVEST_PCT are real,
+        #         meaningful answers that are not scored via scoring.lookup()
+        #         directly, and were confirmed live (twice, on real pursuits)
+        #         to silently vanish from the CURRENT assessment row on every
+        #         recalculation before this fix.
+        print("\n=== 9. P2 and INVEST_PCT survive a recalculation ===")
+        check("1065's fixture has both a real P2 and a real, nonzero "
+              "INVEST_PCT to carry forward",
+              before_1065.get("P2") is not None
+              and before_1065_numeric.get("INVEST_PCT") not in (None, 0),
+              f"got P2={before_1065.get('P2')!r}, "
+              f"INVEST_PCT={before_1065_numeric.get('INVEST_PCT')!r}")
+
+        r = safe(A.post, f"/api/pursuits/{p1065['id']}/recalculate", json={})
+        check("recalculate succeeds", r.status_code == 200,
+              f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            after_1065 = current_answers(db, p1065["id"])
+            after_1065_numeric = current_numeric_answers(db, p1065["id"])
+        check("P2 survived the recalculation, unchanged",
+              after_1065.get("P2") == before_1065.get("P2"),
+              f"before={before_1065.get('P2')!r}, after={after_1065.get('P2')!r}")
+        check("INVEST_PCT (numeric_value, not an option -- a different "
+              "answer shape than every scored question) survived the "
+              "recalculation, unchanged",
+              after_1065_numeric.get("INVEST_PCT") == before_1065_numeric.get("INVEST_PCT"),
+              f"before={before_1065_numeric.get('INVEST_PCT')!r}, "
+              f"after={after_1065_numeric.get('INVEST_PCT')!r}")
+        check("every OTHER (scored) answer also survived, unchanged",
+              {k: v for k, v in after_1065.items() if k != "P2"} ==
+              {k: v for k, v in before_1065.items() if k != "P2"},
+              f"before={before_1065}, after={after_1065}")
+
+        # ---- 9b. a scored answer change still moves the Pwin, AND P2/
+        #          INVEST_PCT still survive THAT recalculation too -- the fix
+        #          must not have merely special-cased "nothing changed".
+        print("\n=== 9b. a scored-answer change still moves the Pwin "
+              "(no regression), and P2/INVEST_PCT survive that too ===")
+        tm1a_before = before_1065.get("TM1A")
+        new_tm1a = "Worse" if tm1a_before != "Worse" else "Better"
+        r = safe(A.patch, f"/api/pursuits/{p1065['id']}/answers",
+                 json={"answers": {"TM1A": new_tm1a}})
+        check("changing TM1a succeeds", r.status_code == 200,
+              f"got {r.status_code}: {r.text}")
+        r1 = safe(A.post, f"/api/pursuits/{p1065['id']}/recalculate", json={})
+        pwin_after_change = r1.json().get("pwin") if r1.status_code == 200 else None
+        check("recalculate succeeds after the TM1a change",
+              r1.status_code == 200, f"got {r1.status_code}: {r1.text}")
+
+        # restore TM1a and recalculate again -- the Pwin should return to
+        # (approximately) its original value, proving the change was real
+        # and reversible, not a fluke of engine nondeterminism.
+        r = safe(A.patch, f"/api/pursuits/{p1065['id']}/answers",
+                 json={"answers": {"TM1A": tm1a_before}})
+        check("restoring TM1a succeeds", r.status_code == 200,
+              f"got {r.status_code}: {r.text}")
+        r2 = safe(A.post, f"/api/pursuits/{p1065['id']}/recalculate", json={})
+        pwin_after_restore = r2.json().get("pwin") if r2.status_code == 200 else None
+        check("recalculate succeeds after restoring TM1a",
+              r2.status_code == 200, f"got {r2.status_code}: {r2.text}")
+        check("the Pwin actually moved when TM1a changed, proving this is "
+              "a real scored-answer effect, not just a P2/INVEST_PCT "
+              "carry-forward with the rest of scoring silently broken",
+              pwin_after_change is not None and pwin_after_change != pwin_after_restore,
+              f"after change={pwin_after_change}, after restore={pwin_after_restore}")
+
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            final_1065 = current_answers(db, p1065["id"])
+            final_1065_numeric = current_numeric_answers(db, p1065["id"])
+        check("P2 and INVEST_PCT (and every other answer) are back to "
+              "exactly their original values after the round trip",
+              final_1065 == before_1065
+              and final_1065_numeric.get("INVEST_PCT") == before_1065_numeric.get("INVEST_PCT"),
+              f"before={before_1065}/{before_1065_numeric}, "
+              f"final={final_1065}/{final_1065_numeric}")
+
+    finally:
+        # Unconditional restore, direct SQL -- runs regardless of where
+        # in the try block above a failure happened. Every fixture this
+        # test can mutate, forced back to its captured "before" snapshot:
+        # p1108's TM1A, p1060's TM2/TM3, p1042's dependency (cleared) and
+        # any DEPENDENT_WON assessment row it fabricated, and p1065's
+        # TM1A. Recalculate-created QUESTIONNAIRE rows (sections 8/9/9b)
+        # are left as-is, same as every other suite this session that
+        # calls the real /recalculate path -- a fresh live computation
+        # from unchanged answers is not something to revert, it is the
+        # real system doing exactly what it is designed to do.
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            restore_answer(db, p1108["id"], "BASE", "TM1A", before.get("TM1A"))
+            restore_answer(db, p1060["id"], "BASE", "TM2", before_1060.get("TM2"))
+            restore_answer(db, p1060["id"], "BASE", "TM3", before_1060.get("TM3"))
+            restore_answer(db, p1065["id"], "BASE", "TM1A", before_1065.get("TM1A"))
+            db.execute("""
+                UPDATE pursuit SET depends_on_pursuit_id = NULL
+                 WHERE id = %s""", (p_indep["id"],))
+            db.execute("""
+                DELETE FROM pwin_answer WHERE pwin_assessment_id IN (
+                    SELECT id FROM pwin_assessment
+                     WHERE pursuit_id = %s AND scenario = 'DEPENDENT_WON')""",
+                (p_indep["id"],))
+            db.execute("""
+                DELETE FROM pwin_assessment
+                 WHERE pursuit_id = %s AND scenario = 'DEPENDENT_WON'""",
+                (p_indep["id"],))
+            db.commit()
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            final_1108 = current_answers(db, p1108["id"])
+            final_1060 = current_answers(db, p1060["id"])
+            final_indep_dep = db.execute(
+                "SELECT depends_on_pursuit_id FROM pursuit WHERE id = %s",
+                (p_indep["id"],)).fetchone()
+        check("cleanup: 1108's TM1A is back to its original value",
+              final_1108.get("TM1A") == before.get("TM1A"),
+              f"got {final_1108.get('TM1A')!r}, expected {before.get('TM1A')!r}")
+        check("cleanup: 1060's TM2/TM3 are back to their original values",
+              final_1060.get("TM2") == before_1060.get("TM2")
+              and final_1060.get("TM3") == before_1060.get("TM3"),
+              f"got {final_1060}, expected {before_1060}")
+        check("cleanup: 1042 is back to independent (no dependency)",
+              final_indep_dep and final_indep_dep["depends_on_pursuit_id"] is None,
+              f"got {final_indep_dep}")
+
 
     print(f"\n{'='*58}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

@@ -10,25 +10,17 @@ scope/closed/sole-source checks every write endpoint in this app does
 """
 from __future__ import annotations
 
-from uuid import UUID
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator
 
 from ..auth import Principal, current_principal, require_role
 from ..db import fetch_one, tenant_tx
 from ..recalc import recalculate_pwin
+from ..routers_common import SCOPED, _uuid
+from ..scoring import ScoringTableError
+from .. import scoring
 
 router = APIRouter(prefix="/api", tags=["recalculate"])
-
-SCOPED = "p.id IN (SELECT pursuit_id FROM fn_user_pursuits(%s))"
-
-
-def _uuid(value: str) -> str:
-    try:
-        return str(UUID(value))
-    except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
 
 
 class RecalculateIn(BaseModel):
@@ -79,9 +71,6 @@ async def recalculate(
     return row
 
 
-_SCORED_CODES = ("TM1A", "TM1B", "TM2", "TM3", "TM4", "TM5", "PP1", "P1")
-
-
 class RecalcPreviewIn(BaseModel):
     # question code -> answer label text, e.g. {"TM1A": "On contract today"}
     answers: dict[str, str]
@@ -89,7 +78,11 @@ class RecalcPreviewIn(BaseModel):
     @field_validator("answers")
     @classmethod
     def _known_codes(cls, v):
-        unknown = set(v) - set(_SCORED_CODES)
+        try:
+            scored_codes = scoring.scored_question_codes()
+        except ScoringTableError as exc:
+            raise ValueError(str(exc))
+        unknown = set(v) - set(scored_codes)
         if unknown:
             raise ValueError(f"unscored question code(s): {sorted(unknown)}")
         return v

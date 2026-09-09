@@ -145,6 +145,37 @@ def is_loaded() -> bool:
     return _tables is not None
 
 
+def scored_question_codes() -> tuple[str, ...]:
+    """The question codes actually scored (accumulated into the Pwin
+    tech/mgmt/pp/price deltas), as DB-style uppercase codes -- e.g.
+    ('TM1A', 'TM1B', ..., 'P1'). Derived from _tables' own key set, not a
+    second hardcoded list: a question is "scored" exactly when the
+    engine's own /v1/scoring-tables response has a table for it. This is
+    genuinely different from -- and narrower than -- the full set of
+    directly-editable questionnaire questions (get_questionnaire()'s own
+    'questions' list): P2 (eval type) is a real, saved questionnaire
+    answer that is never looked up here, since the engine consumes it as
+    context (LPTA vs. Best Value) rather than a scored delta -- confirmed
+    live: P2 has no entry in _tables at all.
+
+    Was hand-duplicated (identical content and order -- confirmed
+    live against this exact key order before consolidating) as
+    recalc.py's _SCORED_QUESTIONS and routers/recalc.py's _SCORED_CODES.
+    index.html's SCORED_UI_KEYS is the frontend's own counterpart of the
+    same list, sourced from this same function via 'scored_question_codes'
+    on the GET /api/reference payload (see portfolio.py) -- the frontend
+    has no other way to know which questions are scored, since raw
+    scoring tables are never exposed to it.
+
+    Raises ScoringTableError if no table has ever been successfully
+    loaded, same discipline as lookup()/get_questionnaire()."""
+    if _tables is None:
+        raise ScoringTableError(
+            "scoring table has not been loaded from the engine yet -- "
+            "cannot list scored questions until a fetch succeeds")
+    return tuple(code.upper() for code in _tables.keys())
+
+
 def get_questionnaire() -> dict:
     """The raw {sections, questions, cascades} spec (engine v0.32+), for
     /api/reference to hand straight to the frontend -- presentation

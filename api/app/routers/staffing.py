@@ -24,32 +24,15 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
-from uuid import UUID
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from ..auth import Principal, current_principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
+from ..routers_common import SCOPED, _uuid
 from ..staffing_escalation import apply_escalation_to_fte
 
 router = APIRouter(prefix="/api/staffing", tags=["staffing"])
-
-SCOPED = "p.id IN (SELECT pursuit_id FROM fn_user_pursuits(%s))"
-
-
-
-def _uuid(value: str) -> str:
-    """Reject a malformed id with 404 rather than letting Postgres raise.
-
-    A bad path parameter is a client error. Returning 500 also tells a
-    prober that the id reached the database, which is more than they need
-    to know -- so this matches the not-found response exactly.
-    """
-    try:
-        return str(UUID(value))
-    except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
 
 # Phases stack BACKWARD from proposal_due_date, in this order.
 # Source: cda_engine/models/staffing/staffing_phaser.py _BACKWARD_PHASES.

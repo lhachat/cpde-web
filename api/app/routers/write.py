@@ -24,10 +24,9 @@ THE RULES, and they are not optional:
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from decimal import Decimal
-
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from psycopg.types.json import Json
@@ -35,28 +34,17 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..auth import Principal, current_principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
-from ..plan_scope import (resolve_plan_year_node, resolve_pursuit_dependency,
+from ..plan_scope import (auto_clear_dependents_of_cancelled,
+                          resolve_plan_year_node, resolve_pursuit_dependency,
                           resolve_pursuit_org_node, resolve_pursuit_owner)
-from ..recalc import recalculate_pwin
+from ..recalc import (active_questionnaire_version_id, latest_questionnaire_id,
+                     recalculate_pwin)
+from ..routers_common import SCOPED, _uuid
 from ..scoring import ScoringTableError, get_questionnaire
 
+logger = logging.getLogger("write")
+
 router = APIRouter(prefix="/api", tags=["write"])
-
-SCOPED = "p.id IN (SELECT pursuit_id FROM fn_user_pursuits(%s))"
-
-
-
-def _uuid(value: str) -> str:
-    """Reject a malformed id with 404 rather than letting Postgres raise.
-
-    A bad path parameter is a client error. Returning 500 also tells a
-    prober that the id reached the database, which is more than they need
-    to know -- so this matches the not-found response exactly.
-    """
-    try:
-        return str(UUID(value))
-    except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
 
 # Whitelist. Anything not here cannot be written through this endpoint,
 # regardless of what the payload contains.
@@ -423,8 +411,7 @@ async def patch_pursuit(
                  WHERE pursuit_id = %s AND scenario = 'BASE' AND is_current""",
                 (p.user_id, pursuit_id))
             if cur.rowcount == 0:
-                qv = fetch_one(cur, "SELECT id FROM questionnaire_version "
-                                    "WHERE code='pwin' AND is_active")
+                qv_id = active_questionnaire_version_id(cur)
                 cur.execute("""
                     INSERT INTO pwin_assessment
                         (pursuit_id, questionnaire_version_id, scenario,
@@ -432,7 +419,7 @@ async def patch_pursuit(
                          is_sole_source_pwin, calculated_by, is_current)
                     VALUES (%s,%s,'BASE','QUESTIONNAIRE','sole-source-rule',
                             0.95, 0.95, TRUE, %s, TRUE)""",
-                    (pursuit_id, qv["id"] if qv else None, p.user_id))
+                    (pursuit_id, qv_id, p.user_id))
             row["pwin"] = 0.95
             row["blended_pwin"] = 0.95
 
@@ -500,7 +487,16 @@ async def patch_pursuit(
         # Failures are non-fatal, same pattern as sole-source-turned-off
         # just above: the phase change itself must not fail just because
         # a fresh recalculation couldn't complete right now.
+        # pipeline_stage_id is nullable at the schema level (no real
+        # pursuit has a NULL one today, confirmed live -- but nothing
+        # enforces that it never will). "!= 'PRE_BH'" alone would treat
+        # a NULL prior stage the same as genuinely having been at a
+        # later stage -- functionally harmless either way (this pursuit
+        # still gets a valid, freshly-computed Pwin), but wrong in
+        # intent: "reverted" should mean there was a real prior stage to
+        # revert FROM, not "we don't know what stage this was".
         reverted_to_pre_bh = (refs.get("pipeline_stage_code") == "PRE_BH"
+                              and exists["stage_code"] is not None
                               and exists["stage_code"] != "PRE_BH")
         if reverted_to_pre_bh and not base_recalc_done:
             try:
@@ -696,6 +692,27 @@ async def set_outcome(
              outcome_date if body.outcome else None,
              set_bid, p.user_id, pursuit_id, p.user_id))
         updated["reopened"] = body.outcome is None
+
+        # Newly cancelled (a transition INTO CANCELLED, not e.g. an
+        # idempotent re-set of an already-cancelled pursuit): every OTHER
+        # pursuit depending on this one has its dependency auto-cleared,
+        # same real write path and same explicit non-silent surfacing as
+        # the sole-source/LPTA reverse-transition auto-clear above --
+        # confirmed against the real VBA source (ClearDependencyRefs_).
+        # See plan_scope.auto_clear_dependents_of_cancelled's own
+        # docstring for why no new blend math is needed here.
+        # Newly cancelled (a transition INTO CANCELLED, not e.g. an
+        # idempotent re-set of an already-cancelled pursuit): every OTHER
+        # pursuit depending on this one has its dependency auto-cleared,
+        # same real write path and same explicit non-silent surfacing as
+        # the sole-source/LPTA reverse-transition auto-clear above --
+        # confirmed against the real VBA source (ClearDependencyRefs_).
+        # See plan_scope.auto_clear_dependents_of_cancelled's own
+        # docstring for why no new blend math is needed here.
+        updated["dependents_cleared"] = (
+            auto_clear_dependents_of_cancelled(cur, pursuit_id, p.user_id)
+            if body.outcome == "CANCELLED" and row["outcome"] != "CANCELLED"
+            else [])
     return updated
 
 
@@ -1106,7 +1123,11 @@ async def set_questionnaire_answers(
         try:
             spec = get_questionnaire()
         except ScoringTableError as exc:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
+            logger.error("scoring table unavailable during answer save: %s", exc)
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                "Cannot validate this answer right now -- the scoring "
+                "engine is unavailable. Try again shortly.")
         is_product = pu["type_group"] == "PRODUCT"
 
         # The pursuit's CURRENT full answer set for this scenario (latest
@@ -1115,19 +1136,14 @@ async def set_questionnaire_answers(
         # this request's changes -- cascade legality is checked against
         # the combination that would actually result, not the changed
         # fields in isolation.
-        assessment = fetch_one(cur, """
-            SELECT id FROM pwin_assessment
-             WHERE pursuit_id = %s AND scenario = %s
-               AND assessment_type = 'QUESTIONNAIRE'
-             ORDER BY calculated_at DESC LIMIT 1""",
-            (pursuit_id, body.scenario))
+        assessment_id = latest_questionnaire_id(cur, pursuit_id, body.scenario)
         current = {}
-        if assessment:
+        if assessment_id:
             rows = fetch_all(cur, """
                 SELECT q.code, o.label_text FROM pwin_answer w
                   JOIN question q ON q.id = w.question_id
                   LEFT JOIN question_option o ON o.id = w.question_option_id
-                 WHERE w.pwin_assessment_id = %s""", (assessment["id"],))
+                 WHERE w.pwin_assessment_id = %s""", (assessment_id,))
             current = {r["code"]: r["label_text"] for r in rows}
         merged = {**current, **body.answers}
 
@@ -1171,7 +1187,7 @@ async def set_questionnaire_answers(
                     f"{label!r} is not a recognized answer for {code}")
             to_write.append((opt["question_id"], opt["id"]))
 
-        if not assessment:
+        if not assessment_id:
             # No QUESTIONNAIRE assessment exists yet for this scenario at
             # all (the common case: a dependency was just set on a
             # pursuit that never had a DEPENDENT_WON row -- see this
@@ -1185,9 +1201,7 @@ async def set_questionnaire_answers(
                 SELECT 1 FROM pwin_assessment
                  WHERE pursuit_id = %s AND scenario = %s AND is_current""",
                 (pursuit_id, body.scenario))
-            qv = fetch_one(cur, """
-                SELECT id FROM questionnaire_version
-                 WHERE code = 'pwin' AND is_active""")
+            qv_id = active_questionnaire_version_id(cur)
             assessment = fetch_one(cur, """
                 INSERT INTO pwin_assessment
                     (pursuit_id, questionnaire_version_id, scenario,
@@ -1195,8 +1209,9 @@ async def set_questionnaire_answers(
                      is_current)
                 VALUES (%s,%s,%s,'QUESTIONNAIRE','manual:answer-save',%s,%s)
              RETURNING id""",
-                (pursuit_id, qv["id"] if qv else None, body.scenario,
+                (pursuit_id, qv_id, body.scenario,
                  p.user_id, already_current is None))
+            assessment_id = assessment["id"]
 
         for question_id, option_id in to_write:
             if option_id is None:
@@ -1208,7 +1223,7 @@ async def set_questionnaire_answers(
                 cur.execute("""
                     DELETE FROM pwin_answer
                      WHERE pwin_assessment_id = %s AND question_id = %s""",
-                    (assessment["id"], question_id))
+                    (assessment_id, question_id))
             else:
                 cur.execute("""
                     INSERT INTO pwin_answer
@@ -1216,7 +1231,7 @@ async def set_questionnaire_answers(
                     VALUES (%s,%s,%s)
                     ON CONFLICT (pwin_assessment_id, question_id)
                     DO UPDATE SET question_option_id = EXCLUDED.question_option_id""",
-                    (assessment["id"], question_id, option_id))
+                    (assessment_id, question_id, option_id))
 
         # An LPTA pursuit cannot have a dependency (see
         # plan_scope.resolve_pursuit_dependency's own note on why --

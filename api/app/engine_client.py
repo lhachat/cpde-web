@@ -112,6 +112,11 @@ def _ssm():
 
 
 def _resolve_key_from_ssm(secret_ref: str) -> str:
+    """Raises EngineCredentialError with JUST the AWS-side reason (no
+    context about which client or secret_ref this was for) -- the one
+    caller, resolve_engine_api_key_for_client(), adds that context
+    exactly once, so the final message is not built by wrapping one
+    "could not resolve..." string inside another."""
     try:
         resp = _ssm().get_parameter(Name=secret_ref, WithDecryption=True)
     except ClientError as exc:
@@ -122,22 +127,21 @@ def _resolve_key_from_ssm(secret_ref: str) -> str:
         # InvalidClientTokenId (local dev credentials expired -- the
         # exact case refresh-aws-creds.ps1 exists to fix) all land here,
         # each with AWS's own real reason, not a guess.
-        raise EngineCredentialError(
-            f"SSM parameter {secret_ref!r}: {code}: {message}") from exc
+        raise EngineCredentialError(f"{code}: {message}") from exc
     except BotoCoreError as exc:
         # No credentials resolved at all, network unreachable, etc. --
         # a different failure class from a ClientError (AWS responded
         # and said no); this is "AWS was never reached".
-        raise EngineCredentialError(
-            f"SSM parameter {secret_ref!r}: {type(exc).__name__}: {exc}") from exc
+        raise EngineCredentialError(f"{type(exc).__name__}: {exc}") from exc
     return resp["Parameter"]["Value"]
 
 
 def resolve_engine_api_key_for_client(client_row: dict) -> str:
     """The real per-client engine API key, SSM-resolved and cached.
-    Raises EngineCredentialError with the client code and the real
-    underlying reason on any failure -- never returns an empty or fake
-    key that would silently reach the engine as "no key sent"."""
+    Raises EngineCredentialError with the client code, the secret_ref,
+    and the real underlying reason on any failure, built at this ONE
+    layer -- never returns an empty or fake key that would silently
+    reach the engine as "no key sent"."""
     client_code = client_row.get("code") or client_row.get("engine_client_code") or "?"
     secret_ref = client_row.get("engine_secret_ref")
     if not secret_ref:
@@ -154,7 +158,8 @@ def resolve_engine_api_key_for_client(client_row: dict) -> str:
         value = _resolve_key_from_ssm(secret_ref)
     except EngineCredentialError as exc:
         raise EngineCredentialError(
-            f"could not resolve engine credentials for client {client_code}: {exc}"
+            f"could not resolve engine credentials for client {client_code} "
+            f"(SSM parameter {secret_ref!r}): {exc}"
         ) from exc
     _key_cache[secret_ref] = (value, now)
     return value

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -32,18 +31,10 @@ from pydantic import BaseModel, Field, field_validator
 from ..auth import Principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
 from ..fee import resolve_fee
-from ..recalc import apply_dependency_blend
+from ..recalc import LATEST_QUESTIONNAIRE_JOIN, apply_dependency_blend
+from ..routers_common import SCOPED, _uuid
 
 router = APIRouter(prefix="/api", tags=["bhptw"])
-
-SCOPED = "p.id IN (SELECT pursuit_id FROM fn_user_pursuits(%s))"
-
-
-def _uuid(value: str) -> str:
-    try:
-        return str(UUID(value))
-    except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
 
 
 class BlackHatIn(BaseModel):
@@ -357,7 +348,7 @@ async def get_bhptw(
         # resolve_fee() as if it were one -- a wrong-but-plausible 0.065
         # instead of the real 0.075, caught only by checking the actual
         # number against known source data, not by any error).
-        questionnaire = fetch_one(cur, """
+        questionnaire = fetch_one(cur, f"""
             SELECT a.base_pwin,
                    (SELECT o.id FROM pwin_answer w
                       JOIN question q ON q.id = w.question_id AND q.code = 'P1'
@@ -366,11 +357,7 @@ async def get_bhptw(
               FROM pwin_assessment a
              WHERE a.pursuit_id = %s AND a.scenario = 'BASE'
                AND a.assessment_type = 'QUESTIONNAIRE'
-               AND a.id = (SELECT id FROM pwin_assessment a2
-                            WHERE a2.pursuit_id = a.pursuit_id
-                              AND a2.scenario = 'BASE'
-                              AND a2.assessment_type = 'QUESTIONNAIRE'
-                            ORDER BY a2.calculated_at DESC LIMIT 1)""",
+               AND a.id = {LATEST_QUESTIONNAIRE_JOIN}""",
             (pursuit_id,))
         has_questionnaire = questionnaire is not None
 

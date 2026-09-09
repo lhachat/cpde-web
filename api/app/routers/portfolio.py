@@ -19,26 +19,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from ..auth import Principal, current_principal
 from ..db import fetch_all, fetch_one, tenant_tx
 from ..plan_scope import exclude_test_fixtures, resolve_license_boundary_nodes
+from ..recalc import LATEST_QUESTIONNAIRE_JOIN
+from ..routers_common import SCOPED, _uuid
 from .. import scoring
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
-
-# Applied to every pursuit query. One definition, reused.
-SCOPED = "p.id IN (SELECT pursuit_id FROM fn_user_pursuits(%s))"
-
-
-
-def _uuid(value: str) -> str:
-    """Reject a malformed id with 404 rather than letting Postgres raise.
-
-    A bad path parameter is a client error. Returning 500 also tells a
-    prober that the id reached the database, which is more than they need
-    to know -- so this matches the not-found response exactly.
-    """
-    try:
-        return str(UUID(value))
-    except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
 
 
 @router.get("/me")
@@ -160,8 +145,10 @@ async def reference(p: Principal = Depends(current_principal)):
     # the same way it treats REF not being loaded yet at all.
     try:
         questionnaire = scoring.get_questionnaire()
+        scored_question_codes = list(scoring.scored_question_codes())
     except scoring.ScoringTableError:
         questionnaire = None
+        scored_question_codes = None
     return {
         "markets": markets,
         "opportunity_types": opp_types,
@@ -175,6 +162,12 @@ async def reference(p: Principal = Depends(current_principal)):
                           {"code": "NO_BID", "label": "No bid"},
                           {"code": "UNDECIDED", "label": "Undecided"}],
         "questionnaire": questionnaire,
+        # Which of questionnaire.questions are actually scored (feed the
+        # Pwin computation) vs. merely answerable -- P2 is a real,
+        # editable questionnaire question but not one of these (see
+        # scoring.scored_question_codes()'s own docstring). The Sandbox's
+        # SCORED_UI_KEYS reads this instead of a second hardcoded list.
+        "scored_question_codes": scored_question_codes,
     }
 
 
@@ -313,7 +306,7 @@ async def pursuit_detail(pursuit_id: str,
         # no pwin_answer children, but the questionnaire answers are still
         # real history and must stay readable. See bootstrap.py for the
         # same fix.
-        row["answers"] = fetch_all(cur, """
+        row["answers"] = fetch_all(cur, f"""
             SELECT q.code, q.section, q.display_order, q.prompt_text,
                    o.code AS answer_code, o.label_text AS answer_label,
                    ans.numeric_value
@@ -323,11 +316,7 @@ async def pursuit_detail(pursuit_id: str,
               LEFT JOIN question_option o ON o.id = ans.question_option_id
              WHERE a.pursuit_id = %s AND a.scenario = 'BASE'
                AND a.assessment_type = 'QUESTIONNAIRE'
-               AND a.id = (SELECT id FROM pwin_assessment a2
-                            WHERE a2.pursuit_id = a.pursuit_id
-                              AND a2.scenario = 'BASE'
-                              AND a2.assessment_type = 'QUESTIONNAIRE'
-                            ORDER BY a2.calculated_at DESC LIMIT 1)
+               AND a.id = {LATEST_QUESTIONNAIRE_JOIN}
              ORDER BY q.display_order""", (pursuit_id,))
     return row
 

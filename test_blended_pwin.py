@@ -90,9 +90,38 @@ def pursuit_id(db, uid):
 
 def current_row(db, pid, scenario):
     return db.execute("""
-        SELECT pwin, base_pwin, blended_pwin FROM pwin_assessment
+        SELECT id, pwin, base_pwin, blended_pwin FROM pwin_assessment
          WHERE pursuit_id = %s AND scenario = %s AND is_current""",
         (pid, scenario)).fetchone()
+
+
+def undo_recalc(db, pid, scenario, original_id):
+    """Deletes the pwin_assessment row /recalculate created for this
+    pursuit+scenario during this test run (identified precisely: the
+    CURRENT row now, if and only if it differs from the id captured
+    BEFORE this test ever called /recalculate -- never touches any row
+    that predates this run) and restores is_current onto the original
+    row. Used only in a finally block, so this test's own repeated runs
+    stop accumulating permanent pwin_assessment history and admin-
+    attributed audit noise on every real pursuit it touches -- confirmed
+    live before this fix: 1055/1060/1073 had accumulated 29-50 rows
+    apiece purely from re-runs of this suite and test_lpta_eval_type.py.
+    original_id may be None (no prior row existed for this scenario) --
+    nothing to restore onto in that case, just delete what this run
+    created."""
+    if original_id is None:
+        return
+    now = db.execute("""
+        SELECT id FROM pwin_assessment
+         WHERE pursuit_id = %s AND scenario = %s AND is_current""",
+        (pid, scenario)).fetchone()
+    if not now or now["id"] == original_id:
+        return
+    db.execute("DELETE FROM pwin_answer WHERE pwin_assessment_id = %s", (now["id"],))
+    db.execute("DELETE FROM pwin_assessment WHERE id = %s", (now["id"],))
+    db.execute("""
+        UPDATE pwin_assessment SET is_current = TRUE WHERE id = %s""",
+        (original_id,))
 
 
 def predecessor_outcome_and_pwin(db, pred_id):
@@ -144,60 +173,100 @@ def main():
     check("1073's real predecessor (1058) is genuinely still open",
           open_outcome is None, f"got {open_outcome!r}")
 
-    print("\n=== Case: no dependency -- blended_pwin stays NULL, pwin == base_pwin ===")
-    r = safe(A.post, f"/api/pursuits/{p_none['id']}/recalculate", json={})
-    check("recalculating 1055 (no dependency) succeeds",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
+    # Captured BEFORE any /recalculate call -- what undo_recalc() restores
+    # each pursuit's BASE scenario back onto in the finally block below,
+    # so this run's own new rows are identifiable precisely (the row
+    # that becomes current that ISN'T this one) and this test stops
+    # accumulating permanent history on every re-run.
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        row = current_row(db, p_none["id"], "BASE")
-    check("1055's blended_pwin is NULL (nothing to blend)",
-          row["blended_pwin"] is None, f"got {row['blended_pwin']}")
-    check("1055's pwin == base_pwin",
-          abs(float(row["pwin"]) - float(row["base_pwin"])) < TOL,
-          f"pwin={row['pwin']} base_pwin={row['base_pwin']}")
+        orig_none = current_row(db, p_none["id"], "BASE")
+        orig_open = current_row(db, p_open["id"], "BASE")
+        orig_won = current_row(db, p_won["id"], "BASE")
+        orig_lost = current_row(db, p_lost["id"], "BASE")
 
-    print("\n=== Case: dependency still open -- blended by predecessor's live Pwin ===")
-    r = safe(A.post, f"/api/pursuits/{p_open['id']}/recalculate", json={})
-    check("recalculating 1073 (open predecessor) succeeds",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        base_row = current_row(db, p_open["id"], "BASE")
-        dep_won_row = current_row(db, p_open["id"], "DEPENDENT_WON")
-        _, pred_pwin = predecessor_outcome_and_pwin(db, p_open["depends_on_pursuit_id"])
-    base = float(base_row["base_pwin"])
-    dep_win = float(dep_won_row["pwin"]) if dep_won_row and dep_won_row["pwin"] is not None else base
-    expected = base + (dep_win - base) * pred_pwin
-    check("1073's stored blended_pwin matches base+(depWin-base)*predecessorPwin",
-          base_row["blended_pwin"] is not None
-          and abs(float(base_row["blended_pwin"]) - expected) < TOL,
-          f"got {base_row['blended_pwin']}, expected {expected}")
-    check("1073's pwin equals its own blended_pwin (headline value is the blend)",
-          base_row["blended_pwin"] is not None
-          and abs(float(base_row["pwin"]) - float(base_row["blended_pwin"])) < TOL,
-          f"pwin={base_row['pwin']} blended_pwin={base_row['blended_pwin']}")
+    try:
+        print("\n=== Case: no dependency -- blended_pwin stays NULL, pwin == base_pwin ===")
+        r = safe(A.post, f"/api/pursuits/{p_none['id']}/recalculate", json={})
+        check("recalculating 1055 (no dependency) succeeds",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            row = current_row(db, p_none["id"], "BASE")
+        check("1055's blended_pwin is NULL (nothing to blend)",
+              row["blended_pwin"] is None, f"got {row['blended_pwin']}")
+        check("1055's pwin == base_pwin",
+              abs(float(row["pwin"]) - float(row["base_pwin"])) < TOL,
+              f"pwin={row['pwin']} base_pwin={row['base_pwin']}")
 
-    print("\n=== Case: dependency decided WON -- factor 1, blended == dep-won Pwin ===")
-    r = safe(D.post, f"/api/pursuits/{p_won['id']}/recalculate", json={})
-    check("recalculating 61 (WON predecessor) succeeds",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        base_row = current_row(db, p_won["id"], "BASE")
-        dep_won_row = current_row(db, p_won["id"], "DEPENDENT_WON")
-    check("61's blended_pwin == its own DEPENDENT_WON pwin exactly (factor 1)",
-          base_row["blended_pwin"] is not None
-          and abs(float(base_row["blended_pwin"]) - float(dep_won_row["pwin"])) < TOL,
-          f"blended={base_row['blended_pwin']} dep_won={dep_won_row['pwin']}")
+        print("\n=== Case: dependency still open -- blended by predecessor's live Pwin ===")
+        r = safe(A.post, f"/api/pursuits/{p_open['id']}/recalculate", json={})
+        check("recalculating 1073 (open predecessor) succeeds",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            base_row = current_row(db, p_open["id"], "BASE")
+            dep_won_row = current_row(db, p_open["id"], "DEPENDENT_WON")
+            _, pred_pwin = predecessor_outcome_and_pwin(db, p_open["depends_on_pursuit_id"])
+        base = float(base_row["base_pwin"])
+        dep_win = float(dep_won_row["pwin"]) if dep_won_row and dep_won_row["pwin"] is not None else base
+        expected = base + (dep_win - base) * pred_pwin
+        check("1073's stored blended_pwin matches base+(depWin-base)*predecessorPwin",
+              base_row["blended_pwin"] is not None
+              and abs(float(base_row["blended_pwin"]) - expected) < TOL,
+              f"got {base_row['blended_pwin']}, expected {expected}")
+        check("1073's pwin equals its own blended_pwin (headline value is the blend)",
+              base_row["blended_pwin"] is not None
+              and abs(float(base_row["pwin"]) - float(base_row["blended_pwin"])) < TOL,
+              f"pwin={base_row['pwin']} blended_pwin={base_row['blended_pwin']}")
 
-    print("\n=== Case: dependency decided LOST -- factor 0, blended == own base Pwin ===")
-    r = safe(D.post, f"/api/pursuits/{p_lost['id']}/recalculate", json={})
-    check("recalculating 53 (LOST predecessor) succeeds",
-          r.status_code == 200, f"got {r.status_code}: {r.text}")
-    with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        base_row = current_row(db, p_lost["id"], "BASE")
-    check("53's blended_pwin == its own base_pwin exactly (factor 0)",
-          base_row["blended_pwin"] is not None
-          and abs(float(base_row["blended_pwin"]) - float(base_row["base_pwin"])) < TOL,
-          f"blended={base_row['blended_pwin']} base={base_row['base_pwin']}")
+        print("\n=== Case: dependency decided WON -- factor 1, blended == dep-won Pwin ===")
+        r = safe(D.post, f"/api/pursuits/{p_won['id']}/recalculate", json={})
+        check("recalculating 61 (WON predecessor) succeeds",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            base_row = current_row(db, p_won["id"], "BASE")
+            dep_won_row = current_row(db, p_won["id"], "DEPENDENT_WON")
+        check("61's blended_pwin == its own DEPENDENT_WON pwin exactly (factor 1)",
+              base_row["blended_pwin"] is not None
+              and abs(float(base_row["blended_pwin"]) - float(dep_won_row["pwin"])) < TOL,
+              f"blended={base_row['blended_pwin']} dep_won={dep_won_row['pwin']}")
+
+        print("\n=== Case: dependency decided LOST -- factor 0, blended == own base Pwin ===")
+        r = safe(D.post, f"/api/pursuits/{p_lost['id']}/recalculate", json={})
+        check("recalculating 53 (LOST predecessor) succeeds",
+              r.status_code == 200, f"got {r.status_code}: {r.text}")
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            base_row = current_row(db, p_lost["id"], "BASE")
+        check("53's blended_pwin == its own base_pwin exactly (factor 0)",
+              base_row["blended_pwin"] is not None
+              and abs(float(base_row["blended_pwin"]) - float(base_row["base_pwin"])) < TOL,
+              f"blended={base_row['blended_pwin']} base={base_row['base_pwin']}")
+
+
+    finally:
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            undo_recalc(db, p_none["id"], "BASE", orig_none["id"] if orig_none else None)
+            undo_recalc(db, p_open["id"], "BASE", orig_open["id"] if orig_open else None)
+            undo_recalc(db, p_won["id"], "BASE", orig_won["id"] if orig_won else None)
+            undo_recalc(db, p_lost["id"], "BASE", orig_lost["id"] if orig_lost else None)
+            db.commit()
+        with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
+            final_none = current_row(db, p_none["id"], "BASE")
+            final_open = current_row(db, p_open["id"], "BASE")
+            final_won = current_row(db, p_won["id"], "BASE")
+            final_lost = current_row(db, p_lost["id"], "BASE")
+        check("cleanup: 1055's current BASE row is the original one -- "
+              "this run's own recalculation was undone, not left behind",
+              (not orig_none) or (final_none and final_none["id"] == orig_none["id"]),
+              f"got {final_none}")
+        check("cleanup: 1073's current BASE row is the original one",
+              (not orig_open) or (final_open and final_open["id"] == orig_open["id"]),
+              f"got {final_open}")
+        check("cleanup: 61's current BASE row is the original one",
+              (not orig_won) or (final_won and final_won["id"] == orig_won["id"]),
+              f"got {final_won}")
+        check("cleanup: 53's current BASE row is the original one",
+              (not orig_lost) or (final_lost and final_lost["id"] == orig_lost["id"]),
+              f"got {final_lost}")
+
 
     print(f"\n{'='*58}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

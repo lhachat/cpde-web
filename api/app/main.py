@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -37,7 +38,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("cpde")
 
-app = FastAPI(title="CPDE API", version="0.4.0")
+# Purely cosmetic API metadata -- surfaces in /openapi.json's info.version
+# and the /docs UI, nothing in this codebase reads it back (confirmed via
+# grep). Keep in sync with CHANGELOG.md's latest released version by hand;
+# there is no single source both currently read from.
+app = FastAPI(title="CPDE API", version="0.8.0")
 
 # Locked to the local dev origin. allow_credentials with a wildcard origin is
 # rejected by browsers and would be wrong anyway -- the session cookie must
@@ -112,6 +117,48 @@ def _shutdown() -> None:
     close_pool()
 
 
+# ---------------------------------------------------------------------
+# Security headers, every response. The Content-Security-Policy is the
+# BACKSTOP for the stored-XSS class the security audit found (a pursuit
+# name containing markup executed script for every user in the tenant):
+# output escaping in index.html is the primary defense, and this makes
+# a missed escaping site inert rather than exploitable. script-src is
+# nonce-only -- no 'unsafe-inline', no hashes -- so neither an injected
+# <script> nor an injected onclick="..." attribute can ever run; the
+# app's one inline <script> block gets a fresh nonce per response from
+# index() below, and its own former inline handler attributes were
+# converted to data-* + a delegated listener for exactly this reason.
+# style-src keeps 'unsafe-inline' deliberately: this app styles almost
+# everything through inline style="" attributes, and a style attribute
+# cannot execute script. No external origins are permitted for anything
+# -- the UI loads nothing but itself.
+# ---------------------------------------------------------------------
+def _csp(nonce: str | None) -> str:
+    script = f"'nonce-{nonce}'" if nonce else "'none'"
+    return ("default-src 'self'; "
+            f"script-src {script}; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "font-src 'self'; "
+            "connect-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'")
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    # index() sets the nonce'd policy itself; everything else (API JSON,
+    # /static files, /docs) gets the script-less policy.
+    response.headers.setdefault("Content-Security-Policy", _csp(None))
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
 # Serve the UI from the API origin. Same-origin means the session cookie is
 # sent without CORS negotiation, and there is no second server to run.
 _UI = Path(__file__).resolve().parent.parent / "static"
@@ -120,7 +167,18 @@ if _UI.is_dir():
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(str(_UI / "index.html"))
+        # Read per request (not cached at import) so uvicorn --reload's
+        # live-mounted edits show up, same as FileResponse did. The one
+        # inline <script> gets this response's nonce; the matching CSP
+        # header is set here explicitly (the middleware's setdefault
+        # leaves it alone).
+        nonce = secrets.token_urlsafe(18)
+        html = (_UI / "index.html").read_text(encoding="utf-8")
+        html = html.replace("<script>", f'<script nonce="{nonce}">', 1)
+        return HTMLResponse(html, headers={
+            "Content-Security-Policy": _csp(nonce),
+            "Cache-Control": "no-store",
+        })
 
 
 @app.get("/health")
@@ -154,7 +212,16 @@ def login(body: LoginRequest, response: Response):
         SESSION_COOKIE, token,
         httponly=True,      # not readable from JavaScript
         samesite="lax",     # not sent on cross-site POSTs
-        secure=os.environ.get("CPDE_SECURE_COOKIE", "0") == "1",
+        # Fails SAFE (secure) if this is ever unset -- an explicit
+        # CPDE_SECURE_COOKIE=0 is required to serve the cookie WITHOUT
+        # the Secure flag (plain HTTP local dev), not an explicit "1" to
+        # turn security on. Previously defaulted to "0" (insecure) with
+        # no explicit local-dev opt-out anywhere, so any environment
+        # that forgot to set this served every session cookie over
+        # plain HTTP by default. docker-compose.yml now sets
+        # CPDE_SECURE_COOKIE=0 explicitly for local dev (which is
+        # genuinely HTTP-only) -- this default flip does not break it.
+        secure=os.environ.get("CPDE_SECURE_COOKIE", "1") != "0",
         max_age=8 * 3600,
         path="/",
     )
@@ -166,6 +233,15 @@ def login(body: LoginRequest, response: Response):
 @app.post("/api/logout")
 def logout(response: Response,
            p: Principal = Depends(current_principal),
+           cpde_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
            ):
+    # destroy_session() actually invalidates the token server-side --
+    # delete_cookie() alone only tells THIS browser to forget it. Without
+    # this call (it was imported and never used), a copied or captured
+    # session cookie stayed valid for its full 8-hour TTL after the user
+    # who owned it "logged out" -- confirmed live before this fix: the
+    # exact copied token still worked against an authenticated endpoint
+    # after a real logout call.
+    destroy_session(cpde_session)
     response.delete_cookie(SESSION_COOKIE, path="/")
     return {"ok": True}

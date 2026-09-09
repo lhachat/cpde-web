@@ -21,6 +21,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 
 from .db import fetch_all, fetch_one
+from .recalc import LATEST_QUESTIONNAIRE_JOIN
 
 
 def exclude_test_fixtures(nodes: list[dict]) -> list[dict]:
@@ -476,7 +477,7 @@ def resolve_pursuit_dependency(cur, pursuit_id, user_id, depends_on_uid: str) ->
     this function, so a single PATCH setting is_sole_source AND a
     dependency together is still caught.
     """
-    source = fetch_one(cur, """
+    source = fetch_one(cur, f"""
         SELECT o.label_text AS p2_answer
           FROM pwin_assessment a
           JOIN pwin_answer w ON w.pwin_assessment_id = a.id
@@ -484,11 +485,7 @@ def resolve_pursuit_dependency(cur, pursuit_id, user_id, depends_on_uid: str) ->
           JOIN question_option o ON o.id = w.question_option_id
          WHERE a.pursuit_id = %s AND a.scenario = 'BASE'
            AND a.assessment_type = 'QUESTIONNAIRE'
-           AND a.id = (SELECT id FROM pwin_assessment a2
-                        WHERE a2.pursuit_id = a.pursuit_id
-                          AND a2.scenario = 'BASE'
-                          AND a2.assessment_type = 'QUESTIONNAIRE'
-                        ORDER BY a2.calculated_at DESC LIMIT 1)""",
+           AND a.id = {LATEST_QUESTIONNAIRE_JOIN}""",
         (pursuit_id,))
     if source and source["p2_answer"] == "LPTA":
         raise HTTPException(
@@ -521,3 +518,54 @@ def resolve_pursuit_dependency(cur, pursuit_id, user_id, depends_on_uid: str) ->
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "this would create a dependency cycle")
     return target_id
+
+
+def auto_clear_dependents_of_cancelled(cur, predecessor_id, user_id) -> list[dict]:
+    """Called when a pursuit's outcome is set to CANCELLED (write.py's
+    set_outcome). Confirmed against the real VBA source (ClearDependencyRefs_):
+    a cancelled predecessor auto-clears depends_on_pursuit_id on every
+    OTHER pursuit that currently points at it -- same real write path as
+    the sole-source/LPTA reverse-transition auto-clear (write.py's own
+    dependency_cleared field just above set_outcome in this file's
+    caller), never a silent side effect.
+
+    A cleared dependent needs no new blend math: apply_dependency_blend's
+    own formula collapses to "pwin = base_pwin, blended_pwin = NULL" the
+    moment there is no dependency at all (recalc.py's own no-dependency
+    case, confirmed live against real pursuit 1055) -- this just applies
+    that same reset directly to the dependent's current BASE row, rather
+    than re-running the full engine recalculation for an input (the
+    predecessor) that no longer factors in at all.
+
+    The dependent's now-orphaned DEPENDENT_WON row (if one exists) is
+    demoted (is_current = FALSE), never deleted -- real history, same
+    discipline as every other pwin_assessment demotion in this app
+    (recalc.py/bhptw.py's own is_current = FALSE updates before a new
+    current row).
+
+    Returns the list of affected dependents (id + external_opportunity_id)
+    so the caller can surface them explicitly in its response -- never a
+    silent side effect on pursuits the caller didn't directly touch.
+    """
+    dependents = fetch_all(cur, """
+        SELECT id, external_opportunity_id, name FROM pursuit
+         WHERE depends_on_pursuit_id = %s""", (predecessor_id,))
+
+    cleared = []
+    for dep in dependents:
+        cur.execute("""
+            UPDATE pursuit SET depends_on_pursuit_id = NULL,
+                   updated_at = now(), updated_by = %s
+             WHERE id = %s""", (user_id, dep["id"]))
+        cur.execute("""
+            UPDATE pwin_assessment SET is_current = FALSE
+             WHERE pursuit_id = %s AND scenario = 'DEPENDENT_WON' AND is_current""",
+            (dep["id"],))
+        cur.execute("""
+            UPDATE pwin_assessment SET pwin = base_pwin, blended_pwin = NULL
+             WHERE pursuit_id = %s AND scenario = 'BASE' AND is_current""",
+            (dep["id"],))
+        cleared.append({"id": str(dep["id"]),
+                        "external_opportunity_id": dep["external_opportunity_id"],
+                        "name": dep["name"]})
+    return cleared

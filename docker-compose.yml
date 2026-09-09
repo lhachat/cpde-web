@@ -47,6 +47,14 @@ services:
       CPDE_DSN: postgresql://cpde_api:localdev_api@db:5432/cpde
       CPDE_ORIGINS: http://localhost:8001
       CPDE_DEV_LOGIN: "1"
+      # This stack serves plain http://localhost:8001, not HTTPS -- a
+      # browser silently refuses to store or send a Secure cookie over
+      # plain HTTP at all, which would break login/session persistence
+      # entirely if left at the code's default (secure, as of this
+      # fix). Explicit local-dev opt-OUT, the same shape as CPDE_DEV_LOGIN
+      # just above: a real deployment must not need to set this at all
+      # to get the safe (secure) behavior.
+      CPDE_SECURE_COOKIE: "0"
       # Local dev target for the Pwin engine (POST /v1/run), overriding
       # client.engine_base_url's production value. host.docker.internal
       # reaches the cda-engine-local container's host-mapped port 8420 --

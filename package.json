@@ -1,0 +1,24 @@
+{
+  "name": "cpde-web",
+  "version": "1.0.0",
+  "description": "Web version of the Competitive Pipeline Decision Engine. FastAPI + Postgres backend, a single-file vanilla-JS frontend. See `CHANGELOG.md` for what's shipped so far.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lhachat/cpde-web.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/lhachat/cpde-web/issues"
+  },
+  "homepage": "https://github.com/lhachat/cpde-web#readme",
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}

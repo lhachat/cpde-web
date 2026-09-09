@@ -71,6 +71,25 @@ logger = logging.getLogger("market_sync")
 DEFAULT_INTERVAL_SECONDS = int(os.environ.get("MARKET_SYNC_INTERVAL_SECONDS", 900))
 
 
+# Reserved app_user row per client (ddl/22_market_sync_actor.sql),
+# is_active = FALSE so it can never log in -- exists only to give this
+# job's own writes a real, resolvable actor in audit_log instead of a
+# NULL one indistinguishable from "nobody recorded who did this".
+_SERVICE_ACTOR_EMAIL = "service.market-sync@cpde.internal"
+
+
+def _resolve_service_actor_id(client_id) -> str | None:
+    """This client's reserved market-sync app_user id, or None if
+    ddl/22_market_sync_actor.sql hasn't been applied yet for it (an
+    older/un-migrated DB) -- callers fall back to tenant_tx()'s own
+    default (no actor) rather than fail the sync over this."""
+    with tenant_tx(client_id) as cur:
+        row = fetch_all(cur, """
+            SELECT id FROM app_user WHERE client_id = %s AND email = %s""",
+            (client_id, _SERVICE_ACTOR_EMAIL))
+    return row[0]["id"] if row else None
+
+
 def _generate_code(name: str, existing_codes: set[str]) -> str:
     """Slugify a market name into a code, matching the existing seed
     convention (e.g. "OCS - General" -> OCS_GENERAL, see ddl/03_seed.sql's
@@ -168,12 +187,13 @@ async def sync_client_markets(client_row: dict) -> dict:
     no orphaned 'running' rows.
     """
     client_id, client_code = client_row["id"], client_row["code"]
+    actor_id = _resolve_service_actor_id(client_id)
     try:
         names = await fetch_engine_market_names(client_row)
     except Exception as exc:
         logger.error("market sync FAILED for %s: could not fetch engine "
                     "markets: %s", client_code, exc)
-        with tenant_tx(client_id) as cur:
+        with tenant_tx(client_id, actor_id) as cur:
             cur.execute("""
                 INSERT INTO market_sync_run
                     (client_id, finished_at, status, error_message)
@@ -181,7 +201,7 @@ async def sync_client_markets(client_row: dict) -> dict:
                 (client_id, str(exc)))
         return {"client": client_code, "status": "failed", "error": str(exc)}
 
-    with tenant_tx(client_id) as cur:
+    with tenant_tx(client_id, actor_id) as cur:
         result = apply_market_sync(cur, client_id, names)
         cur.execute("""
             INSERT INTO market_sync_run

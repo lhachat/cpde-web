@@ -16,6 +16,8 @@ on pwin_needs_recalc.
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException, status
 from psycopg.types.json import Jsonb
 
@@ -23,6 +25,8 @@ from . import scoring
 from .db import fetch_all, fetch_one
 from .engine_client import EngineCredentialError, call_run
 from .fee import resolve_fee
+
+logger = logging.getLogger("recalc")
 from .scoring import ScoringTableError, accumulate, lookup
 
 # BASE_SCORE is read via the `scoring` module reference (scoring.BASE_SCORE),
@@ -33,10 +37,54 @@ from .scoring import ScoringTableError, accumulate, lookup
 # importing them by name is fine, since they read scoring's live module
 # state at CALL time, not at import time.
 
-# Question codes scored by scoring.py, in a fixed order for the
-# accumulation list -- order doesn't affect the sum, but keeping it fixed
-# makes engine_request reproducible for the same answers.
-_SCORED_QUESTIONS = ("TM1A", "TM1B", "TM2", "TM3", "TM4", "TM5", "PP1", "P1")
+def active_questionnaire_version_id(cur):
+    """The id of the currently-active 'pwin' questionnaire_version, or None.
+
+    Was hand-duplicated (this exact query) in this module and twice in
+    write.py -- extracted here since this module is already the shared
+    dependency both call.
+    """
+    qv = fetch_one(cur, """
+        SELECT id FROM questionnaire_version
+         WHERE code = 'pwin' AND is_active""")
+    return qv["id"] if qv else None
+
+
+# is_current tracks where a pursuit's LIVE Pwin comes from, which can be a
+# later BLACK_HAT/PTW row -- it does NOT track where the pursuit's
+# questionnaire ANSWERS live. Any query that joins pwin_assessment to get
+# at those answers needs to separately pick the latest row of
+# assessment_type='QUESTIONNAIRE' for the pursuit+scenario it cares about.
+#
+# This fragment is meant to be embedded (via an f-string) into a larger
+# query that already aliases the assessment row being filtered as `a` --
+# it correlates on a.scenario, which is exactly right whether the outer
+# query already pins a.scenario to a literal ('BASE') or leaves it open
+# (bootstrap.py's bulk per-pursuit-per-scenario dashboard query). Was
+# hand-duplicated (identical in shape, differing only in a hardcoded
+# 'BASE' vs. this same a.scenario correlation -- provably equivalent,
+# since the hardcoded sites already pin a.scenario to 'BASE' in their own
+# outer WHERE before this ever runs) in plan_scope.py, bhptw.py,
+# portfolio.py, bootstrap.py and this module's own fetch_current_answers.
+LATEST_QUESTIONNAIRE_JOIN = """(SELECT id FROM pwin_assessment a2
+                            WHERE a2.pursuit_id = a.pursuit_id
+                              AND a2.scenario = a.scenario
+                              AND a2.assessment_type = 'QUESTIONNAIRE'
+                            ORDER BY a2.calculated_at DESC LIMIT 1)"""
+
+
+def latest_questionnaire_id(cur, pursuit_id, scenario):
+    """The id of the latest QUESTIONNAIRE pwin_assessment row for one
+    pursuit+scenario, or None -- the standalone (non-JOIN-embedded) form
+    of LATEST_QUESTIONNAIRE_JOIN above, for a caller that isn't already
+    inside a bigger query aliasing the row as `a`."""
+    row = fetch_one(cur, """
+        SELECT id FROM pwin_assessment
+         WHERE pursuit_id = %s AND scenario = %s
+           AND assessment_type = 'QUESTIONNAIRE'
+         ORDER BY calculated_at DESC LIMIT 1""",
+        (pursuit_id, scenario))
+    return row["id"] if row else None
 
 
 def apply_dependency_blend(cur, pursuit_id: str, predecessor_id: str) -> None:
@@ -63,11 +111,16 @@ def apply_dependency_blend(cur, pursuit_id: str, predecessor_id: str) -> None:
         exists in AERO/DEMO today to re-verify that recursive step
         against, but it follows directly from reading the same column
         this function itself writes).
+      - predecessor CANCELLED: 0.0, same as LOST -- decided 2026-09-09
+        against the real VBA source (ClearDependencyRefs_): a cancelled
+        predecessor auto-clears the dependency entirely (write.py's
+        set_outcome), so this branch only matters defensively for
+        already-inconsistent data. See its own comment below.
 
-    No real CANCELLED/NO_BID predecessor has a real dependent in AERO/DEMO
-    today (confirmed live), and the source spreadsheet formula has no
-    branch for this case -- raises rather than inventing one. If this is
-    ever hit for real, it needs an actual decision, not a silent guess.
+    No real NO_BID predecessor has a real dependent in AERO/DEMO today
+    (confirmed live), and the source spreadsheet formula has no branch
+    for this case -- raises rather than inventing one. If this is ever
+    hit for real, it needs an actual decision, not a silent guess.
 
     Recorded on the BASE row only (blended_pwin's own column comment).
     pwin is set to the SAME blended value there, matching the original
@@ -105,17 +158,35 @@ def apply_dependency_blend(cur, pursuit_id: str, predecessor_id: str) -> None:
 
     if outcome == "WON":
         dep_factor = 1.0
-    elif outcome == "LOST":
+    elif outcome in ("LOST", "CANCELLED"):
+        # CANCELLED: decided (2026-09-09) against the real VBA source
+        # (ClearDependencyRefs_) -- a cancelled predecessor auto-clears
+        # depends_on_pursuit_id on every dependent (write.py's
+        # set_outcome, via plan_scope.auto_clear_dependents_of_cancelled),
+        # so in normal operation this function is never even called with
+        # a CANCELLED predecessor any more (the dependent has no
+        # dependency left by the time anything here would run). This
+        # branch is defensive only, for a pursuit whose dependency
+        # somehow still points at an already-cancelled predecessor (e.g.
+        # data from before this fix existed) -- treated the same as
+        # LOST/dep_factor=0.0, which is exactly "revert to this
+        # pursuit's own Base Pwin", matching what the auto-clear path
+        # itself produces.
         dep_factor = 0.0
-    elif outcome in ("CANCELLED", "NO_BID"):
+    elif outcome == "NO_BID":
+        # Out of scope for the CANCELLED fix above -- no auto-clear
+        # exists for a NO_BID predecessor, so the hard lock stays until
+        # that gets its own real decision (no real NO_BID predecessor
+        # with a real dependent exists in AERO/DEMO today, confirmed
+        # live -- see this module's own docstring).
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "This pursuit's depended-on predecessor is "
-            f"{outcome} -- the real spreadsheet formula this blend is "
-            "based on has no defined behavior for a cancelled/no-bid "
-            "predecessor (never occurred in the migrated production data "
-            "either), so this needs a real decision rather than an "
-            "invented rule. Pwin for this pursuit was not updated.")
+            "This pursuit's depended-on predecessor is NO_BID -- the "
+            "real spreadsheet formula this blend is based on has no "
+            "defined behavior for a no-bid predecessor (never occurred "
+            "in the migrated production data either), so this needs a "
+            "real decision rather than an invented rule. Pwin for this "
+            "pursuit was not updated.")
     else:
         pred_row = fetch_one(cur, """
             SELECT pwin FROM pwin_assessment
@@ -212,7 +283,7 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
         # option (INVEST_PCT is numeric_value; see the INSERT loop
         # below, which now carries all three shapes forward instead of
         # assuming every question is option-based).
-        answers = fetch_all(cur, """
+        answers = fetch_all(cur, f"""
             SELECT q.id AS question_id, q.code, o.id AS option_id,
                    o.label_text, w.numeric_value, w.boolean_value
               FROM pwin_assessment a
@@ -221,11 +292,7 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
               LEFT JOIN question_option o ON o.id = w.question_option_id
              WHERE a.pursuit_id = %s AND a.scenario = %s
                AND a.assessment_type = 'QUESTIONNAIRE'
-               AND a.id = (SELECT id FROM pwin_assessment a2
-                            WHERE a2.pursuit_id = a.pursuit_id
-                              AND a2.scenario = a.scenario
-                              AND a2.assessment_type = 'QUESTIONNAIRE'
-                            ORDER BY a2.calculated_at DESC LIMIT 1)""",
+               AND a.id = {LATEST_QUESTIONNAIRE_JOIN}""",
             (pursuit_id, scenario))
         by_code = {r["code"]: r for r in answers}
     if not by_code:
@@ -260,7 +327,7 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
     try:
         deltas = [lookup("tm5", label("TM5"), pu["type_group"] or "")
                  if code == "TM5" else lookup(code, label(code))
-                 for code in _SCORED_QUESTIONS]
+                 for code in scoring.scored_question_codes()]
         total = accumulate(deltas)
         tech = scoring.BASE_SCORE + total["tech"]
         mgmt = scoring.BASE_SCORE + total["mgmt"]
@@ -269,8 +336,15 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
         # The scoring table itself couldn't be loaded from the engine --
         # this can't even be attempted, distinct from /v1/run failing
         # below. Keep the message specific rather than folding it into
-        # either of the generic engine-failure messages further down.
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
+        # either of the generic engine-failure messages further down --
+        # but never forward exc's own text, which can transitively carry
+        # an engine-fetch failure's internal detail (see the /v1/run
+        # EngineCredentialError handling further down for the same rule).
+        logger.error("scoring table unavailable during recalculation: %s", exc)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Cannot recalculate right now -- the scoring table is "
+            "unavailable. Try again shortly.")
     price_delta = total["client_price"]
     cprice_delta = total["comp_price"]
     client_bid_price = 100.0 * (1.0 + price_delta)
@@ -317,17 +391,27 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
     try:
         result = await call_run(pu, payload)
     except EngineCredentialError as exc:
-        # A credential/SSM/IAM problem, NOT an engine-side failure --
-        # keep the message specific ("could not resolve engine
-        # credentials...") rather than folding it into the generic
-        # "could not reach the engine" below, which would send someone
-        # debugging a real credential expiry down a network/DNS rabbit
-        # hole instead.
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
-    except Exception as exc:
+        # A credential/SSM/IAM problem, NOT an engine-side failure -- log
+        # the real reason (SSM parameter path, AWS error code) server-side
+        # only; str(exc) must never reach the client, which would leak
+        # internal SSM paths straight into a 502 body (confirmed live:
+        # "SSM parameter '/cda/clients/.../key-value': ParameterNotFound:
+        # ''" -- exactly the kind of detail rule 6 in CLAUDE.md exists
+        # for). The client gets a specific-but-safe message instead of
+        # the generic engine-unreachable one below, so debugging still
+        # starts in the right place (credentials, not network/DNS).
+        logger.error("engine credential error during recalculation: %s", exc)
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
-            f"Could not reach the Pwin engine: {exc}")
+            "Could not authenticate to the Pwin engine -- an administrator "
+            "needs to check this client's engine credentials.")
+    except Exception as exc:
+        # httpx's own exception text can include the engine's URL --
+        # same rule, log the real detail, never forward it verbatim.
+        logger.error("could not reach the Pwin engine during recalculation: %s", exc)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Could not reach the Pwin engine -- try again shortly.")
 
     # HTTP 200 with solver_succeeded=false is the engine's own failure
     # convention (confirmed in runtime/api.py) -- treat it as a hard
@@ -348,9 +432,7 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
         UPDATE pwin_assessment SET is_current = FALSE
          WHERE pursuit_id = %s AND scenario = %s AND is_current""",
         (pursuit_id, scenario))
-    qv = fetch_one(cur, """
-        SELECT id FROM questionnaire_version
-         WHERE code = 'pwin' AND is_active""")
+    qv_id = active_questionnaire_version_id(cur)
     row = fetch_one(cur, """
         INSERT INTO pwin_assessment
             (pursuit_id, questionnaire_version_id, scenario,
@@ -363,7 +445,7 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
                 %s,%s,
                 %s,%s,TRUE)
      RETURNING id, scenario, pwin, base_pwin, calculated_at""",
-        (pursuit_id, qv["id"] if qv else None, scenario,
+        (pursuit_id, qv_id, scenario,
          "engine:/v1/run", user_id,
          pwin, pwin, tech, mgmt, pp,
          price_delta, cprice_delta,
@@ -379,15 +461,15 @@ async def recalculate_pwin(cur, pursuit_id: str, user_id,
     # moment a newer QUESTIONNAIRE row exists.
     #
     # Carries forward EVERY previously-stored answer, not just the 8
-    # scored questions (_SCORED_QUESTIONS is what SCORING reads --
-    # never was the definition of "every real answer this pursuit has").
-    # P2 (Best Value/LPTA) and INVEST_PCT are real, meaningful answers a
-    # user set that are not scored via lookup() directly, and were
-    # silently dropping off the CURRENT row on every recalculation --
-    # confirmed live, twice, on real pursuits, before this fix. Handles
-    # all three answer shapes pwin_answer supports (question_option_id /
-    # numeric_value / boolean_value), not just the option-based one
-    # every _SCORED_QUESTIONS entry happens to be.
+    # scored questions (scoring.scored_question_codes() is what SCORING
+    # reads -- never was the definition of "every real answer this
+    # pursuit has"). P2 (Best Value/LPTA) and INVEST_PCT are real,
+    # meaningful answers a user set that are not scored via lookup()
+    # directly, and were silently dropping off the CURRENT row on every
+    # recalculation -- confirmed live, twice, on real pursuits, before
+    # this fix. Handles all three answer shapes pwin_answer supports
+    # (question_option_id / numeric_value / boolean_value), not just the
+    # option-based one every scored question happens to be.
     for code, ans_row in by_code.items():
         if not ans_row or not ans_row.get("question_id"):
             continue

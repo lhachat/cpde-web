@@ -24,7 +24,15 @@ from .db import unscoped_tx
 
 SESSION_COOKIE = "cpde_session"
 SESSION_TTL = timedelta(hours=8)
-DEV_LOGIN_ENABLED = os.environ.get("CPDE_DEV_LOGIN", "1") == "1"
+# Fails SAFE (off) if this is ever unset -- an explicit CPDE_DEV_LOGIN=1
+# is required to turn password-less login on, not an explicit "0" to
+# turn it off. Same shape of bug as MARKET_SYNC_ENABLED already avoided
+# (see main.py's own note there) and the anti-pattern this exact line
+# used to be: previously defaulted to "1", so an environment that forgot
+# to set this variable at all got password-less login by default.
+# docker-compose.yml sets CPDE_DEV_LOGIN=1 explicitly for local dev --
+# this default flip does not affect it.
+DEV_LOGIN_ENABLED = os.environ.get("CPDE_DEV_LOGIN", "0") == "1"
 
 
 @dataclass(frozen=True)

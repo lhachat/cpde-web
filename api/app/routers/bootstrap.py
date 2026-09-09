@@ -25,12 +25,12 @@ from ..plan_scope import (assignable_pursuit_org_nodes, dashboard_scope_node_ids
                           dashboard_scope_options, dependency_candidates,
                           exclude_test_fixtures, owner_candidates_by_org_node,
                           resolve_dashboard_node, resolve_license_boundary_nodes)
+from ..recalc import LATEST_QUESTIONNAIRE_JOIN
+from ..routers_common import SCOPED
 from .staffing import (_pursuit_filter, apply_cutoff, client_escalation_rates,
                        compute_phase_dates, monthly_contributions)
 
 router = APIRouter(prefix="/api", tags=["bootstrap"])
-
-SCOPED = "p.id IN (SELECT pursuit_id FROM fn_user_pursuits(%s))"
 
 
 @router.get("/bootstrap")
@@ -183,11 +183,7 @@ async def bootstrap(scope_node_id: str | None = Query(default=None),
              WHERE {SCOPED}
                AND a.assessment_type = 'QUESTIONNAIRE'
                AND p.org_node_id = ANY(%s::uuid[])
-               AND a.id = (SELECT id FROM pwin_assessment a2
-                            WHERE a2.pursuit_id = a.pursuit_id
-                              AND a2.scenario = a.scenario
-                              AND a2.assessment_type = 'QUESTIONNAIRE'
-                            ORDER BY a2.calculated_at DESC LIMIT 1)""",
+               AND a.id = {LATEST_QUESTIONNAIRE_JOIN}""",
             (p.user_id, dash_scope_ids))
 
         staff_rows = fetch_all(cur, f"""

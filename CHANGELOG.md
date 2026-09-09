@@ -9,6 +9,221 @@ it does.
 
 ---
 
+## [0.8.0] — 2026-09-09
+
+This project's first comprehensive security, code-quality, and QC audit
+ran this round -- live database checks, live API probes, and real
+source inspection against NIST 800-171-relevant control families, not
+documentation review. It found a CRITICAL stored XSS vulnerability and
+a test harness that had been silently hiding failed verification behind
+a green banner, among other real findings across auth/session
+lifecycle, within-repo code duplication, test cleanup reliability, and
+least-privilege database access. Every finding below has been
+independently fixed and re-verified, not just reported -- and, as with
+every prior round, every temporary test mutation was restored via the
+real write path, confirmed via audit log or direct query.
+
+### First full security/quality audit
+
+- First comprehensive audit against NIST 800-171-relevant control
+  families, code quality, and test/QC review -- live database checks,
+  live API probes, and real source inspection, not documentation
+  review.
+- Every finding below traces to this audit and has been independently
+  fixed and re-verified, not just reported.
+
+### CRITICAL: stored XSS, fully remediated
+
+- Zero output escaping existed anywhere in the frontend -- proven live
+  with a real payload (`onerror` executing `window.__xss=1` across six
+  views; an injected inline `<script>` and `onclick` both ran) before
+  any fix.
+- Fixed in three layers: a shared `esc()` helper applied at 90 call
+  sites (found by reading every render function end to end, well
+  beyond the audit's originally-named locations -- chart labels, the
+  help modal, presence names, audit-diff values were all injection
+  points nobody had named); a nonce-based Content-Security-Policy with
+  no `unsafe-inline` as a backstop, requiring all 10 inline `onclick`
+  handlers to be converted to delegated listeners; input-side
+  hardening deliberately NOT added, with reasoning recorded (output
+  escaping is the actual fix; input validation alone gives false
+  comfort).
+- Verified adversarially: escaping bypassed deliberately to confirm
+  CSP alone stops execution, with real `securitypolicyviolation`
+  browser events observed.
+- Permanent regression test (`test_xss_escaping.js`, Playwright) locks
+  in the exact audit payload.
+
+### Test harness was hiding failures behind a green banner
+
+- `run_tests.ps1` printed "ALL SUITES PASSED" regardless of skips --
+  confirmed live that a no-AWS-session run was silently dropping 100
+  assertions (7 suites, not the 6 first estimated) under an unqualified
+  green banner.
+- Fixed: skips are now a real, distinct state from pass/fail, every
+  suite's own summary line is machine-summed (not hand-counted), exit
+  codes distinguish clean/skipped/failed, and a drift detector flags
+  any suite whose assertion count changes between runs without
+  explanation.
+- The drift detector caught a real nested instance of the same bug on
+  its first run (`test_questionnaire_migration.py` silently shrinking
+  its own count) and a mis-scoped suite gate, both fixed.
+- The real, current, trustworthy total: 475 assertions across 22
+  suites (see Test suite growth below).
+
+### Auth and session lifecycle
+
+- `DEV_LOGIN_ENABLED` and `CPDE_SECURE_COOKIE` both defaulted to the
+  UNSAFE state when unset -- both flipped to fail-safe, confirmed live
+  against the actual running container, not just the source.
+- Logout cleared the cookie but never invalidated the session server-
+  side (`destroy_session` imported, never called) -- a copied session
+  token remained fully valid after logout, confirmed by literally
+  replaying one; now correctly rejected (401) after logout.
+
+### `effectivePwin` -- two sources of truth for sole-source Pwin, removed
+
+- A client-side override unconditionally displayed 95% for any
+  sole-source pursuit regardless of what the server actually stored --
+  this is the specific mechanism that hid the stale 1080/1098/1124
+  Pwin values for as long as it went unnoticed earlier this session.
+- Removed from all 5 call sites; the real stored value is now what
+  displays everywhere, consistent with the dollar-weighted math beside
+  it.
+
+### Test cleanup reliability
+
+- A test suite was destroying `aero.admin`'s real, live dashboard
+  settings on every run -- moved to a dedicated test-fixture user.
+- Two test files had no `finally` cleanup -- a real historical crash
+  had already left a pursuit in a dirty state for the next run to trip
+  over; fixed and verified with a genuinely forced failure, not a
+  claim.
+- Two test files were accumulating permanent, uncleaned rows on real
+  pursuits every run -- fixed, verified stable across repeated runs.
+
+### Within-repo duplication consolidated
+
+- Five clusters of hand-duplicated logic (a UUID helper x5, a scope
+  constant x6, a scored-question list, a "latest current assessment"
+  subquery x6, an active-questionnaire-version lookup) consolidated to
+  one source each (`routers_common.py`, `recalc.py`), verified one at a
+  time, not as a single sweep.
+- One item's original premise was found incomplete mid-task (a 4th
+  "duplicate," `write.py`'s `QUESTION_CODE_TO_SPEC_ID`, was a
+  genuinely different, broader list, not the same 8-question set as
+  the other three) -- scope correctly narrowed rather than forcing a
+  mismatched merge; the 3 that actually agreed now derive from the
+  live engine spec (`scoring.scored_question_codes()`), including a
+  new `scored_question_codes` field on `GET /api/reference` so the
+  frontend's own Sandbox could stop hardcoding a second copy.
+- Caught and fixed a real regression introduced during this work
+  itself (an incomplete variable rename in `write.py`'s answer-save
+  path) before it could ship, precisely because each consolidation was
+  verified independently against the full suite.
+
+### Low-severity findings, all fixed
+
+- App database role's grants narrowed to least privilege (SELECT-only)
+  on 13 tables it never legitimately writes -- 11 global reference
+  tables plus `client`/`app_user` (`ddl/21_least_privilege.sql`).
+- `market_sync`'s audit rows previously had no actor attribution --
+  given a real, login-incapable service account per client
+  (`ddl/22_market_sync_actor.sql`).
+- Internal detail (SSM paths, engine URLs, raw exception text) removed
+  from client-facing error responses at 5 sites -- logged server-side
+  instead, a generic-but-specific message returned to the client.
+- Stray database dumps (`backup.sql`, `backup_before_rls.sql`) and an
+  archive (`files.zip`) untracked from git, `.gitignore` updated so
+  they can't return.
+- Stale version string (`main.py` still said `0.4.0`), a
+  double-wrapped `EngineCredentialError` message, and an imprecise
+  NULL-handling check in the phase-revert path cleaned up.
+
+### Cancelled predecessor no longer hard-locks its dependent
+
+- Confirmed against the real source VBA (`ClearDependencyRefs_`):
+  cancelling a predecessor should auto-clear the dependency, not block
+  the dependent pursuit.
+- Implemented: cancelling a predecessor now auto-clears every real
+  dependent's `depends_on_pursuit_id`, demotes (never deletes) any
+  orphaned `DEPENDENT_WON` assessment, and the dependent's Pwin
+  correctly reverts to its own Base Pwin -- verified live, including
+  the harder case (a real, previously-assessed `DEPENDENT_WON` row
+  correctly demoted, not lost).
+- `NO_BID`'s equivalent hard lock is explicitly UNCHANGED and flagged,
+  not silently assumed resolved -- confirmed no real pursuit can reach
+  that state through the current API regardless (the outcome-setting
+  endpoint's own validator only ever accepts WON/LOST/CANCELLED/null).
+- `test_cancelled_predecessor.py` (new, permanent) locks this in
+  against real pursuits.
+
+### Standing process change
+
+- `CLAUDE.md` created (confirmed via full git history search that none
+  existed in this repo before) with a permanent section baking this
+  audit's specific findings into standing development practice for
+  every future session, not just this one-time remediation.
+
+### Test suite growth
+
+| Suite | Assertions | Result |
+|---|---|---|
+| `test_isolation.py` — tenant isolation (RLS) | 29 | pass |
+| `test_scope.py` — business-unit scope | 14 | pass |
+| `test_integrity.py` — data integrity | 44 | pass (1 warning, non-fatal, unchanged since v0.2.0) |
+| `test_market_sync.py` — market sync job | 19 | pass |
+| `test_recalc_response_handling.py` — engine response-shape discipline | 3 | pass |
+| `test_scoring_migration.py` — live scoring-table migration | 10 | pass |
+| `test_fee_competitor_migration.py` — fee/competitor migration | 8 | pass |
+| `test_api_security.py` — API-layer security | 127 | pass |
+| `test_pursuit_owner.py` — Owner/POC field | 14 | pass |
+| `test_pursuit_dependency.py` — Depends-on field | 18 | pass |
+| `test_staffing_escalation.py` — staffing escalation model | 14 | pass |
+| `test_questionnaire_migration.py` — live questionnaire migration | 11 | pass |
+| `test_questionnaire_answers.py` — answer save path + recalculation | 40 | pass |
+| `test_lpta_eval_type.py` — LPTA `eval_type` derivation | 8 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_blended_pwin.py` — dependency-blend math | 25 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_cancelled_predecessor.py` — cancelled-predecessor auto-clear (new) | 19 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_dependency_restrictions.py` — sole-source/LPTA dependency block | 6 | pass |
+| `test_xss_escaping.js` — XSS escaping + CSP (Playwright) | 28 | pass |
+| `test_revert_to_pre_bh.py` — revert-to-Pre-BH fresh recalculation | 13 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_bhptw_phase_change.py` — Black Hat/PTW phase change | 11 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_engine_client.py` — real AWS/SSM + live engine verification | 10 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_tm1a_tm1b_tm2_cascade.py` — cascade fix re-verification | 4 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+
+**475 assertions passing across twenty-two suites** (up from 416 across
+twenty at v0.7.0).
+
+### Known gaps
+
+- Seven additional RLS-protected tables (`org_node`, `pursuit_staffing`,
+  `pursuit_staffing_meta`, `user_scope_assignment`,
+  `pursuit_phase_duration`, `pursuit_year_projection`, `audit_log`)
+  noted as also showing zero direct app writes during the
+  least-privilege fix -- deliberately not narrowed this round, flagged
+  as a separate future decision.
+- The shared-test-fixture-pursuit fragility (one pursuit serving 4+
+  test suites) -- the `finally`-block fixes mostly neutralize this, but
+  it's a real, still-open item for a future round.
+- `NO_BID`'s hard lock in `apply_dependency_blend()` is unchanged (see
+  above) -- no real pursuit can reach that state through the current
+  API, but the branch itself still raises rather than having a real
+  decision behind it.
+- SSO/SCIM/licensing/admin delegation UI (backlog 3h) -- on hold.
+- Self-service user management -- still SQL-only.
+- Duplicate pursuit detection (backlog 3d) -- not started.
+- The Salesforce plugin's own migration to the engine-served
+  scoring/fee/questionnaire spec -- separate repo, status not recently
+  confirmed.
+- The 9 closed, Post-BH/PTW pursuits with a corrected-in-place but
+  never-promoted QUESTIONNAIRE row (v0.7.0) remain unpromoted -- still
+  a real, open decision.
+- DASH_CFG's per-widget filters (mentioned in the config panel's own
+  copy as future scope) are still not wired -- unchanged since v0.6.0.
+
+---
+
 ## [0.7.0] — 2026-09-08
 
 A correctness-focused round: a real LPTA scoring bug affecting 39

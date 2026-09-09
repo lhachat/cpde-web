@@ -266,15 +266,47 @@ def main():
             body = rr.json()
             check("response includes a 'questionnaire' key",
                   "questionnaire" in body, f"got top-level keys {list(body.keys())}")
-            if body.get("questionnaire"):
-                qids = [x["id"] for x in body["questionnaire"]["questions"]]
-                check("questionnaire.questions includes all 13 expected "
-                      "fields (9 scored + pursuit_type/contract_type/"
-                      "bidders/market)",
-                      set(qids) == {"tm1a", "tm1b", "tm2", "tm3", "tm4", "tm5",
-                                   "pp1", "p1", "p2", "pursuit_type",
-                                   "contract_type", "bidders", "market"},
-                      f"got {qids}")
+            # portfolio.py's own /reference handler deliberately returns
+            # questionnaire=None (never a 502) when the API CONTAINER's own
+            # scoring/questionnaire cache has never successfully loaded --
+            # a real, documented, legitimate state for the live APP to be
+            # in during an engine outage. It is NOT a legitimate outcome
+            # for THIS TEST to accept silently: this section's whole point
+            # is confirming the questionnaire is actually wired end-to-end
+            # over live HTTP, and a None here means that was never
+            # verified. Previously gated behind `if body.get("questionnaire"):`,
+            # which silently skipped the check below instead of failing --
+            # the suite's own assertion count quietly dropped from 10 to 9
+            # with no failure, no skip message, nothing (found by
+            # run_tests.ps1's drift detector). Explicit and unconditional
+            # now: this always runs, and fails loudly with a pointer at the
+            # real cause (the API CONTAINER's own AWS session, not this
+            # test process's -- section 2 above mocks its own fetch and
+            # proves nothing about the container's live state) rather than
+            # silently running one fewer check. run_tests.ps1 gates this
+            # whole suite on that same container AWS session being live
+            # (the same precondition every sibling engine-dependent suite
+            # already gates on) specifically so this failure is never hit
+            # in the ordinary no-AWS local-dev case -- there, the suite is
+            # skipped outright, not silently degraded.
+            questionnaire = body.get("questionnaire")
+            check("the 'questionnaire' value is non-null -- the live "
+                  "engine spec was actually loaded in the api CONTAINER "
+                  "serving this request, not just mocked in this test "
+                  "process",
+                  questionnaire is not None,
+                  f"got questionnaire={questionnaire!r} -- is the api "
+                  f"container's own AWS session live? (docker exec "
+                  f"cpde-api python -c \"import boto3; "
+                  f"boto3.client('sts').get_caller_identity()\")")
+            qids = [x["id"] for x in (questionnaire or {}).get("questions", [])]
+            check("questionnaire.questions includes all 13 expected "
+                  "fields (9 scored + pursuit_type/contract_type/"
+                  "bidders/market)",
+                  set(qids) == {"tm1a", "tm1b", "tm2", "tm3", "tm4", "tm5",
+                               "pp1", "p1", "p2", "pursuit_type",
+                               "contract_type", "bidders", "market"},
+                  f"got {qids}")
 
     # ---- 4. Market's help is null and that's handled, not an error -----
     print("\n=== 4. Market's help is null in the spec -- confirmed, not "

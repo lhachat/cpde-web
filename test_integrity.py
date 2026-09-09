@@ -29,6 +29,12 @@ from psycopg.rows import dict_row
 
 ERRORS: list[str] = []
 WARNS: list[str] = []
+# Every check that did not ERROR -- "ok" and WARN alike -- so this suite
+# reports a "N passed, M failed" line in the same format as every other
+# suite. Before this, it printed only "N error(s), M warning(s)", which
+# run_tests.ps1 could not sum, and this suite's assertion count in the
+# CHANGELOG had to be assembled by hand. Found by the security audit.
+PASS: list[str] = []
 
 
 def check(cur, name, sql, params=(), severity="ERROR", expect_zero=True):
@@ -40,12 +46,15 @@ def check(cur, name, sql, params=(), severity="ERROR", expect_zero=True):
         sample = "; ".join(str(dict(r)) for r in rows[:3])
         msg = f"{name}: {bad} row(s) -- {sample}"
         (ERRORS if severity == "ERROR" else WARNS).append(msg)
+        if severity != "ERROR":
+            PASS.append(name)      # a warning is a pass with a note, not a failure
         print(f"  {severity:5} {name}: {bad} row(s)")
         for r in rows[:3]:
             print(f"          {dict(r)}")
         if bad > 3:
             print(f"          ... and {bad - 3} more")
     else:
+        PASS.append(name)
         print(f"  ok    {name}")
 
 
@@ -80,6 +89,7 @@ def main():
         # it not having been.
         try:
             test_sole_source_migration_applied(cur)
+            PASS.append("is_sole_source_pwin column exists")
             print("  ok    is_sole_source_pwin column exists "
                   "(12_sole_source_pwin.sql applied)")
         except AssertionError as e:
@@ -396,6 +406,7 @@ def main():
                AND (rolsuper OR rolbypassrls) LIMIT 20""")
 
     print(f"\n{'='*58}")
+    print(f"{len(PASS)} passed, {len(ERRORS)} failed")
     print(f"{len(ERRORS)} error(s), {len(WARNS)} warning(s)")
     if WARNS:
         print("\nWARNINGS (not failing):")
