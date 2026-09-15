@@ -27,7 +27,7 @@ from .auth import (DEV_LOGIN_ENABLED, SESSION_COOKIE, Principal,
 from . import scoring
 from .db import close_pool, pool
 from .market_sync import market_sync_loop
-from .routers import bhptw, bootstrap, portfolio, recalc, staffing, write
+from .routers import bhptw, bootstrap, portfolio, recalc, staffing, users, write
 
 # Nothing in this app configured logging before market_sync.py existed --
 # every logger.info/error call was silently dropped by the root logger's
@@ -42,7 +42,7 @@ logger = logging.getLogger("cpde")
 # and the /docs UI, nothing in this codebase reads it back (confirmed via
 # grep). Keep in sync with CHANGELOG.md's latest released version by hand;
 # there is no single source both currently read from.
-app = FastAPI(title="CPDE API", version="0.8.0")
+app = FastAPI(title="CPDE API", version="0.9.0")
 
 # Locked to the local dev origin. allow_credentials with a wildcard origin is
 # rejected by browsers and would be wrong anyway -- the session cookie must
@@ -62,6 +62,7 @@ app.include_router(bootstrap.router)
 app.include_router(write.router)
 app.include_router(bhptw.router)
 app.include_router(recalc.router)
+app.include_router(users.router)
 
 
 _market_sync_task: asyncio.Task | None = None

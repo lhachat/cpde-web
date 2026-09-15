@@ -24,11 +24,20 @@ not a guess at it) names the correct eval_type for each -- not just
 "the Pwin changed", which a coincidence could mask, but the literal
 value sent to the engine.
 
+DEDICATED, SINGLE-PURPOSE fixtures (2026-09-15). This suite recalculates
+both pursuits on every run, so it must not share them with another suite
+that also writes. It previously used 1055 (shared with test_blended_pwin,
+which also recalculates it) and 1060 (shared with three other suites, one
+of which renames it to an XSS payload) -- both real ordering hazards.
+1066 and 1063 are used by this suite and nothing else; confirmed
+unreferenced anywhere else in the harness before claiming them. Don't
+reuse them elsewhere.
+
 Fixtures (real AERO pursuits, both genuinely Pre-BH and OPEN -- verified
 directly, not assumed, after an earlier draft of this test picked 1027
 by name alone and it turned out to be POST_PTW/WON, not Pre-BH):
-  1055 -- Inlet Program, Pre-BH, open, real P2=LPTA answer
-  1060 -- Ridgeline Upgrade, Pre-BH, open, real P2=Best Value answer
+  1066 -- Windlass Modernization, Pre-BH, open, real P2=LPTA answer
+  1063 -- Foundry Modernization, Pre-BH, open, real P2=Best Value answer
 
     python test_lpta_eval_type.py --base http://localhost:8001 ^
       --admin-dsn "postgresql://cpde:localdev@localhost:5433/cpde"
@@ -47,6 +56,11 @@ import psycopg
 from psycopg.rows import dict_row
 
 PASS, FAIL = [], []
+
+# Dedicated to this suite alone -- see the fixture note in the module
+# docstring above before pointing any other test at either of these.
+LPTA_UID = "1066"        # real P2=LPTA pursuit
+BV_UID = "1063"          # real P2=Best Value pursuit
 
 
 def safe(fn, *a, **kw):
@@ -103,9 +117,11 @@ def undo_recalc(db, pursuit_id, original_id):
     now, only if it differs from the id captured BEFORE this test ever
     called /recalculate) and restores is_current onto the original row.
     finally-block only -- this test's own repeated runs were
-    accumulating permanent history otherwise (confirmed live: 1055/1060
-    had 42/50 pwin_assessment rows before this fix, purely from re-runs
-    of this suite and test_blended_pwin.py)."""
+    accumulating permanent history otherwise (confirmed live at the time
+    on this suite's THEN-fixtures 1055/1060, which had 42/50
+    pwin_assessment rows before this fix, purely from re-runs of this
+    suite and test_blended_pwin.py; this suite now uses its own dedicated
+    1066/1063 -- see the module docstring)."""
     if original_id is None:
         return
     now_id = current_id(db, pursuit_id)
@@ -137,24 +153,27 @@ def main():
 
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
         p_lpta = db.execute(
-            "SELECT id FROM pursuit WHERE external_opportunity_id = '1055'").fetchone()
+            "SELECT id FROM pursuit WHERE external_opportunity_id = %s",
+            (LPTA_UID,)).fetchone()
         p_bv = db.execute(
-            "SELECT id FROM pursuit WHERE external_opportunity_id = '1060'").fetchone()
+            "SELECT id FROM pursuit WHERE external_opportunity_id = %s",
+            (BV_UID,)).fetchone()
 
     if not p_lpta or not p_bv:
-        check("fixture pursuits 1055 (LPTA) and 1060 (Best Value) exist",
+        check(f"fixture pursuits {LPTA_UID} (LPTA) and {BV_UID} "
+              "(Best Value) exist",
               False, f"got {p_lpta}, {p_bv}")
         print(f"\n{'='*58}\n{len(PASS)} passed, {len(FAIL)} failed")
         return 1
 
     with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
-        lpta_answer = p2_answer(db, "1055")
-        bv_answer = p2_answer(db, "1060")
-    check("1055's real, stored P2 answer is genuinely LPTA (fixture "
+        lpta_answer = p2_answer(db, LPTA_UID)
+        bv_answer = p2_answer(db, BV_UID)
+    check(f"{LPTA_UID}'s real, stored P2 answer is genuinely LPTA (fixture "
           "sanity, not assumed)",
           lpta_answer and lpta_answer["label_text"] == "LPTA",
           f"got {lpta_answer}")
-    check("1060's real, stored P2 answer is genuinely Best Value "
+    check(f"{BV_UID}'s real, stored P2 answer is genuinely Best Value "
           "(fixture sanity, not assumed)",
           bv_answer and bv_answer["label_text"] == "Best Value",
           f"got {bv_answer}")
@@ -204,11 +223,11 @@ def main():
         with psycopg.connect(args.admin_dsn, row_factory=dict_row) as db:
             final_lpta_id = current_id(db, p_lpta["id"])
             final_bv_id = current_id(db, p_bv["id"])
-        check("cleanup: 1055's current BASE row is the original one -- "
+        check(f"cleanup: {LPTA_UID}'s current BASE row is the original one -- "
               "this run's own recalculation was undone, not left behind",
               orig_lpta_id is None or final_lpta_id == orig_lpta_id,
               f"got {final_lpta_id}, expected {orig_lpta_id}")
-        check("cleanup: 1060's current BASE row is the original one",
+        check(f"cleanup: {BV_UID}'s current BASE row is the original one",
               orig_bv_id is None or final_bv_id == orig_bv_id,
               f"got {final_bv_id}, expected {orig_bv_id}")
 

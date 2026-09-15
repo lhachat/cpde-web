@@ -9,6 +9,206 @@ it does.
 
 ---
 
+## [0.9.0] — 2026-09-15
+
+Three rounds of follow-through on items v0.8.0 left open: the `NO_BID`
+dependency lock brought in line with the `CANCELLED` fix, the
+shared-test-fixture ordering risk actually measured and then reduced,
+and a new admin-facing user management capability that closes the last
+remaining "this requires raw SQL" gap in the app. As with every prior
+round, each item was verified live against the real database, the real
+engine and (where UI-facing) a real browser -- and every temporary test
+mutation was restored via the real write path.
+
+### `NO_BID` predecessor lock extended to match `CANCELLED`
+
+- `apply_dependency_blend()`'s hard 409 was relaxed for `CANCELLED`
+  predecessors in v0.8.0 but deliberately left in place for `NO_BID`,
+  on the grounds that no real pursuit could reach that outcome through
+  the API (`OutcomeIn`'s own validator only accepts
+  WON/LOST/CANCELLED/null -- still true, and unchanged).
+- Closed anyway, for consistency and defense in depth: `NO_BID` now
+  auto-clears dependents exactly the way `CANCELLED` does, and folds
+  into the same `dep_factor = 0.0` branch as `LOST`/`CANCELLED` rather
+  than raising. No outcome value hard-locks that function any more.
+- `plan_scope.auto_clear_dependents_of_cancelled` renamed
+  `auto_clear_dependents_of_outcome` -- its body was already entirely
+  outcome-agnostic (it clears dependents of a given predecessor id and
+  never inspected the outcome at all), so this generalised the name and
+  the call-site condition rather than duplicating any logic.
+- RED confirmed directly rather than skipped: with the fix absent, a
+  real dependency (1059 -> 1057) plus a DB-level `NO_BID` on the
+  predecessor made `apply_dependency_blend()` raise the documented 409
+  and write nothing. Called directly because that function only runs
+  *after* `recalculate_pwin()` has already reached a live engine, and it
+  performs no engine or scoring work itself -- so a direct call is an
+  equally real test of the exact code path, not a proxy for it.
+- GREEN verified live on a real pair, including the harder case: a
+  real, previously-assessed `DEPENDENT_WON` row correctly demoted
+  (`is_current = false`, same row, same `calculated_at` -- preserved as
+  history, not deleted), the dependent's `depends_on_pursuit_id`
+  cleared, its BASE row reverted to `pwin == base_pwin` with
+  `blended_pwin` back to NULL, and `/recalculate` moving from a hard
+  409 to a clean 200.
+- `test_cancelled_predecessor.py` now covers both outcomes (38
+  assertions, up from 19) -- `CANCELLED` end to end through the real
+  API, `NO_BID` through the real production function with the outcome
+  set directly at the DB level, which is the only way that state is
+  reachable at all today.
+
+### Test fixture isolation -- real cross-suite ordering risk removed
+
+- Measured before changing anything, and the risk was worse than
+  previously described: pursuit 1060 was serving four suites and being
+  MUTATED by three of them -- including `test_xss_escaping.js`, which
+  PATCHes the pursuit's **name** to an XSS payload and only restores it
+  in a `finally`. Accumulated assessment history made the pattern
+  visible in numbers (1060: 65 rows, 1055: 42, 1073: 31).
+- Three already-unused, already-integrity-compliant real pursuits
+  reassigned as dedicated single-suite fixtures -- each verified clean,
+  dependency-free, not a predecessor of anything, and unreferenced
+  anywhere else in the harness before being claimed: 1062 (XSS probe),
+  1066 + 1063 (LPTA `eval_type`'s LPTA and Best Value pair).
+- Result: 1060 went from 4 suites / 3 mutators to 2 suites / 1 mutator;
+  1055 became single-owner. Both changes are recorded in the affected
+  suites' own docstrings so the dedication does not silently erode.
+- Sharing that was left in place ON PURPOSE, and documented as such
+  rather than overlooked: 1073 (one suite recalculates it, the other
+  only renders its Depends-on picker -- read-only, so no ordering
+  hazard in either direction) and 1108/1074 (used only as PATCH targets
+  that are asserted to be REJECTED, so read-only in effect).
+- Verified with two consecutive full runs producing byte-identical
+  summaries, plus the state check that actually matters: the three new
+  fixtures accumulated **nothing** across both runs (1 -> 1, 1 -> 1,
+  2 -> 2), and 1055 froze at 42 rows now that only one suite touches it.
+- Deliberately NOT attempted: a genuinely flagged fixture mechanism.
+  `is_test_fixture` exists only on `org_node`, never on `pursuit`, and
+  the one org node carrying that flag (BUZ) is asserted by two suites to
+  hold zero pursuits -- so a flagged fixture pursuit would have required
+  a new org node or a schema change. Reassignment was the smallest safe
+  change that removes the real risk.
+
+### Admin user management -- closes the last SQL-only gap
+
+- Confirmed genuinely true before building anything: `GET /api/users`
+  404'd, and as the application role `INSERT INTO app_user` returned
+  `permission denied for table app_user`. Adding a user really did
+  require a direct SQL INSERT as a superuser.
+- That permission error was itself a consequence of v0.8.0's own
+  least-privilege narrowing, which had revoked writes on `app_user`
+  after confirming nothing wrote it -- and said explicitly to grant them
+  back only when a real endpoint needed them. `ddl/23_user_admin_grants.sql`
+  is that grant.
+- New admin-only capability (`routers/users.py` + a Users view): list
+  users in the admin's own visible scope, create a user with a role and
+  org-unit scope assignment, edit name/role/scope, and
+  deactivate/reactivate.
+- Every mechanism is an existing one -- `fn_user_has_scope` /
+  `fn_user_visible_org_nodes` for scope resolution (the same
+  resolution every other scoped feature uses), the existing generic
+  `trg_audit` on both `app_user` and `user_scope_assignment` for
+  auditing, `tenant_tx(client_id, user_id)` so `set_actor()` attributes
+  every change, and 404-never-403 for out-of-scope ids. No new patterns.
+- `INSERT` and `UPDATE` granted, `DELETE` deliberately NOT: deactivation
+  (`is_active = false`, which `fn_lookup_login` already refuses) is the
+  only mechanism, so the application role is structurally incapable of
+  destroying historical record even if this router had a bug.
+- Reactivate was added although not explicitly requested -- a one-way
+  deactivation would simply have moved the SQL dependency elsewhere,
+  defeating the point of the feature.
+- Self-deactivation is refused: locking the last admin out of the only
+  screen that could undo it is a trap worth closing at the endpoint
+  rather than discovering afterwards.
+- **Two real bugs caught by live browser verification specifically, not
+  by reading the diff**: (1) a CSS specificity conflict
+  (`.nav a{display:block}`, 0-1-1, beating the UA stylesheet's
+  `[hidden]{display:none}`, 0-1-0) silently made the `hidden` attribute
+  a no-op, leaving the admin-only nav link visible to non-admins -- the
+  server-side gate held throughout (403 confirmed from a non-admin's own
+  browser session), so this was a dead-end link rather than an access
+  hole; fixed generally with `[hidden]{display:none!important}` so the
+  attribute means what every caller assumes. (2) the test's own first
+  draft asserted against `audit_log.user_id` for the new user, which
+  records the ACTOR, not the subject -- a user who has only logged in
+  has no such rows; corrected by having the fixture user perform a real
+  audited write of their own (per-user dashboard layout, audited and
+  touching no shared data) before asserting that history survives
+  deactivation.
+- Explicitly out of scope and unchanged: no SSO, no SCIM, no licensing
+  or seat-count enforcement -- those remain the separate, still-on-hold
+  3h effort.
+
+### Test suite growth
+
+| Suite | Assertions | Result |
+|---|---|---|
+| `test_isolation.py` — tenant isolation (RLS) | 29 | pass |
+| `test_scope.py` — business-unit scope | 14 | pass |
+| `test_integrity.py` — data integrity | 44 | pass (1 warning, non-fatal, unchanged since v0.2.0) |
+| `test_market_sync.py` — market sync job | 19 | pass |
+| `test_recalc_response_handling.py` — engine response-shape discipline | 3 | pass |
+| `test_scoring_migration.py` — live scoring-table migration | 10 | pass |
+| `test_fee_competitor_migration.py` — fee/competitor migration | 8 | pass |
+| `test_api_security.py` — API-layer security | 127 | pass |
+| `test_pursuit_owner.py` — Owner/POC field | 14 | pass |
+| `test_pursuit_dependency.py` — Depends-on field | 18 | pass |
+| `test_staffing_escalation.py` — staffing escalation model | 14 | pass |
+| `test_questionnaire_migration.py` — live questionnaire migration | 11 | pass |
+| `test_questionnaire_answers.py` — answer save path + recalculation | 40 | pass |
+| `test_lpta_eval_type.py` — LPTA `eval_type` derivation | 8 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_blended_pwin.py` — dependency-blend math | 25 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_cancelled_predecessor.py` — CANCELLED **and NO_BID** predecessor auto-clear | 38 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_user_admin.py` — admin user management (new) | 34 | pass |
+| `test_dependency_restrictions.py` — sole-source/LPTA dependency block | 6 | pass |
+| `test_xss_escaping.js` — XSS escaping + CSP (Playwright) | 28 | pass |
+| `test_revert_to_pre_bh.py` — revert-to-Pre-BH fresh recalculation | 13 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_bhptw_phase_change.py` — Black Hat/PTW phase change | 11 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_engine_client.py` — real AWS/SSM + live engine verification | 10 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+| `test_tm1a_tm1b_tm2_cascade.py` — cascade fix re-verification | 4 | pass (requires a live AWS session; skipped, not failed, otherwise) |
+
+**528 assertions passing across twenty-three suites** (up from 475
+across twenty-two at v0.8.0).
+
+### Known gaps
+
+- Two high-accumulation test pursuits -- 1065 (~119 assessment rows) and
+  1038 (~97), each growing ~3 rows per full run. Both are SINGLE-OWNER,
+  so this is a cleanup-completeness issue, not a cross-suite ordering
+  risk; worth its own pass, not urgent.
+- `n_bu == 123` is hardcoded in `test_api_security.py` -- only relevant
+  if a future fixture-isolation round pursues the new-org-node approach
+  instead of pursuit reassignment, since anything added under BU or its
+  divisions would trip it.
+- Six RLS-protected tables (`org_node`, `pursuit_staffing`,
+  `pursuit_staffing_meta`, `pursuit_phase_duration`,
+  `pursuit_year_projection`, `audit_log`) still show zero direct app
+  writes and were deliberately not narrowed -- a separate future
+  decision. (`user_scope_assignment` has been removed from this list:
+  `routers/users.py` now genuinely writes it.)
+- SSO/SCIM/licensing/admin delegation UI (backlog 3h) -- on hold. Note
+  this is now strictly about identity-provider integration and seat
+  enforcement: manual admin-driven user management is no longer part of
+  it, having shipped this round.
+- Duplicate pursuit detection (backlog 3d) -- not started.
+- The `cpde-salesforce` product's `key-value` SSM parameter is stored as
+  a plain `String`, not a `SecureString`, unlike every other client key
+  -- found while auditing `cdaEngineTaskRole`'s KMS permissions; handed
+  to the Salesforce plugin's own workstream, status not confirmed here.
+- No `cpde-web` production deployment exists yet (`cpdeWebTaskRole` is
+  provisioned but inert, no ECS task attached). Whoever builds it must
+  set `MARKET_SYNC_ENABLED=true` from day one -- see `market_sync.py`'s
+  own docstring.
+- The Salesforce plugin's own migration to the engine-served
+  scoring/fee/questionnaire spec -- separate repo, status not recently
+  confirmed.
+- The 9 closed, Post-BH/PTW pursuits with a corrected-in-place but
+  never-promoted QUESTIONNAIRE row (v0.7.0) remain unpromoted -- still
+  a real, open decision.
+- DASH_CFG's per-widget filters (mentioned in the config panel's own
+  copy as future scope) are still not wired -- unchanged since v0.6.0.
+
+---
+
 ## [0.8.0] — 2026-09-09
 
 This project's first comprehensive security, code-quality, and QC audit

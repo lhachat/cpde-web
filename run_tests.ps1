@@ -50,7 +50,8 @@ $Expected = [ordered]@{
     'LPTA EVAL_TYPE DERIVATION'                 = 8
     'BLENDED_PWIN (dependency blend)'           = 25
     'SOLE-SOURCE/LPTA DEPENDENCY RESTRICTION'   = 6
-    'CANCELLED PREDECESSOR AUTO-CLEAR'          = 19
+    'ADMIN USER MANAGEMENT'                     = 34
+    'CANCELLED PREDECESSOR AUTO-CLEAR'          = 38
     'XSS ESCAPING + CSP (Playwright)'           = 28
     'REVERT TO PRE-BH (fresh recalculation)'    = 13
     'BH/PTW PHASE CHANGE'                       = 11
@@ -150,6 +151,9 @@ $AwsApiSuites = @(
 foreach ($s in $AwsApiSuites) {
     if (-not $ApiUp) { Skip-Suite $s.N $NoApi } elseif (-not $AwsLive) { Skip-Suite $s.N $NoAws } else { Invoke-Suite $s.N $s.C }
 }
+
+if ($ApiUp) { Invoke-Suite 'ADMIN USER MANAGEMENT' { python test_user_admin.py --base $BASE --admin-dsn $ADMIN } }
+else        { Skip-Suite   'ADMIN USER MANAGEMENT' $NoApi }
 
 if ($ApiUp) { Invoke-Suite 'SOLE-SOURCE/LPTA DEPENDENCY RESTRICTION' { python test_dependency_restrictions.py --base $BASE --admin-dsn $ADMIN } }
 else        { Skip-Suite   'SOLE-SOURCE/LPTA DEPENDENCY RESTRICTION' $NoApi }

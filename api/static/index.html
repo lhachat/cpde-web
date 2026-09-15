@@ -28,6 +28,12 @@ body{background:var(--canvas);color:var(--ink);
 .nav{padding:10px 0;flex:1;overflow:auto}
 .nav-lbl{padding:14px 18px 5px;font-size:9px;letter-spacing:.16em;
   text-transform:uppercase;color:#6E6E6E}
+/* The UA stylesheet's [hidden]{display:none} loses to any explicit
+   display rule of higher specificity -- .nav a{display:block} below is
+   exactly that case, which silently made hidden="" a no-op on the nav
+   entries (caught by the Playwright run, not by reading the diff). This
+   makes the hidden attribute mean what every caller assumes it means. */
+[hidden]{display:none!important}
 .nav a{display:block;padding:7px 18px;color:#BFBFBF;text-decoration:none;
   font-size:12.5px;border-left:2px solid transparent;cursor:pointer}
 .nav a:hover{background:#1C1C1C;color:#fff}
@@ -322,6 +328,8 @@ tr.nobid td b{text-decoration:line-through}
    <div class="nav-lbl">Planning</div>
    <a data-v="sandbox">Scenario Sandbox</a>
    <a data-v="targets">Targets &amp; Budgets</a>
+   <div class="nav-lbl" id="navAdminLbl" hidden>Administration</div>
+   <a data-v="users" id="navUsers" hidden>Users</a>
  </nav>
  <div class="side-ft">Demo Business Unit<br><span id="pyLbl">Planning year 2026</span></div>
 </aside>
@@ -338,6 +346,7 @@ tr.nobid td b{text-decoration:line-through}
   <div id="bp" class="view"></div>
   <div id="sandbox" class="view"></div>
   <div id="targets" class="view"></div>
+  <div id="users" class="view"></div>
   <div id="import" class="view"></div>
  </div></div></div>
 
@@ -2649,10 +2658,183 @@ function vImport(){
      client, since custom field names differ by org.</div></div>`;
 }
 
+/* ---------- user management (admin only) ----------
+   Every control here is wired by property assignment after render, never
+   an inline onclick attribute -- the CSP (script-src nonce-only) makes
+   inline handlers inert, so they would silently do nothing. Every value
+   interpolated below is a server-provided string (email, display name,
+   org unit name) and therefore goes through esc(), same rule as every
+   other render path in this file.
+
+   The admin gate here is COSMETIC ONLY -- hiding the nav link stops an
+   ordinary user stumbling into a screen that cannot work for them. The
+   real gate is require_role("admin") on every endpoint in
+   routers/users.py; this UI never being rendered is not what keeps a
+   non-admin out. */
+let UM = null;          // {users, org_units, roles} from GET /api/users
+let umEdit = null;      // user id being edited, 'new', or null
+
+async function loadUsers(){
+  try{
+    const res = await fetch('/api/users', {credentials:'same-origin'});
+    if(res.status===401){ showLogin(); return; }
+    if(res.status===403){ UM={users:[],org_units:[],roles:[],denied:true}; vUsers(); return; }
+    if(!res.ok){ toast('Could not load users', true); return; }
+    UM = await res.json();
+  }catch(e){ toast('Could not load users', true); return; }
+  vUsers();
+}
+
+function umRoleName(code){
+  const r = (UM.roles||[]).find(x=>x.code===code);
+  return r ? r.name : code;
+}
+
+function vUsers(){
+  const el = $('#users');
+  if(!el) return;
+  if(!isAdmin()){
+    el.innerHTML = `<div class="card"><h3>Administrator only</h3>
+      <div class="pad"><p style="margin:0">User management is restricted to
+      administrators.</p></div></div>`;
+    return;
+  }
+  if(!UM){
+    el.innerHTML = `<div class="card"><h3>Users</h3>
+      <div class="pad"><p style="margin:0">Loading...</p></div></div>`;
+    return;
+  }
+  const rows = (UM.users||[]).map(u=>{
+    const units = (u.assignments||[]).map(a=>esc(a.org_unit_name)).join(', ') || '--';
+    const role = (u.assignments||[]).length
+      ? esc(umRoleName(u.assignments[0].role_code)) : '--';
+    return `<tr>
+      <td>${esc(u.display_name)}</td>
+      <td>${esc(u.email)}</td>
+      <td>${role}</td>
+      <td>${units}</td>
+      <td>${u.is_active
+            ? '<span class="pill ok">Active</span>'
+            : '<span class="pill">Inactive</span>'}</td>
+      <td class="r">
+        <button class="btn sm" data-um-edit="${esc(u.id)}">Edit</button>
+        <button class="btn sm" data-um-active="${esc(u.id)}"
+                data-um-to="${u.is_active ? '0' : '1'}">${
+                u.is_active ? 'Deactivate' : 'Reactivate'}</button>
+      </td></tr>`;
+  }).join('');
+
+  el.innerHTML = `
+  <div class="flag">Users are never deleted. Deactivating blocks sign-in while
+    keeping every historical record that references them intact.</div>
+  <div class="card"><h3>Users in your scope</h3>
+    <div class="pad"><button class="btn" id="umNew">Add user</button></div>
+    <div class="tw"><table><thead><tr>
+      <th>Name</th><th>Email</th><th>Role</th><th>Org units</th>
+      <th>Status</th><th class="r">Actions</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="6">No users in your scope.</td></tr>'}</tbody>
+    </table></div></div>
+  <div id="umForm"></div>`;
+
+  $('#umNew').onclick = ()=>{ umEdit='new'; vUsers(); };
+  $$('#users [data-um-edit]').forEach(b=>b.onclick=()=>{
+    umEdit = b.dataset.umEdit; vUsers(); });
+  $$('#users [data-um-active]').forEach(b=>b.onclick=()=>
+    setUserActive(b.dataset.umActive, b.dataset.umTo === '1'));
+
+  if(umEdit) umForm();
+}
+
+function umForm(){
+  const creating = umEdit === 'new';
+  const u = creating ? null : (UM.users||[]).find(x=>x.id===umEdit);
+  if(!creating && !u){ umEdit=null; return; }
+  const curRole = (!creating && (u.assignments||[]).length)
+    ? u.assignments[0].role_code : 'read_only';
+  const curUnits = creating ? []
+    : (u.assignments||[]).map(a=>a.org_unit_code);
+
+  $('#umForm').innerHTML = `
+  <div class="card"><h3>${creating ? 'Add user' : 'Edit ' + esc(u.display_name)}</h3>
+   <div class="pad">
+    <div class="fr"><label>Display name</label>
+      <div class="fv"><input class="inp" id="umName" maxlength="200"
+        value="${creating ? '' : esc(u.display_name)}"></div></div>
+    <div class="fr"><label>Email</label><div class="fv">${
+      creating
+        ? '<input class="inp" id="umEmail" maxlength="320" placeholder="name@example.com">'
+        : `<span>${esc(u.email)}</span>`}</div></div>
+    <div class="fr"><label>Role</label><div class="fv">
+      <select class="inp" id="umRole">${(UM.roles||[]).map(r=>
+        `<option value="${esc(r.code)}"${r.code===curRole?' selected':''}>${
+          esc(r.name)}</option>`).join('')}</select></div></div>
+    <div class="fr"><label>Org units</label><div class="fv">${
+      (UM.org_units||[]).map(o=>
+        `<label style="display:block"><input type="checkbox" class="umUnit"
+          value="${esc(o.code)}"${curUnits.includes(o.code)?' checked':''}>
+          ${esc(o.name)}</label>`).join('') || 'No org units in your scope.'}
+      </div></div>
+    <div class="pad">
+      <button class="btn" id="umSave">${creating ? 'Create user' : 'Save changes'}</button>
+      <button class="btn" id="umCancel">Cancel</button></div>
+   </div></div>`;
+
+  $('#umCancel').onclick = ()=>{ umEdit=null; vUsers(); };
+  $('#umSave').onclick = saveUser;
+}
+
+async function umSend(url, method, payload){
+  const res = await fetch(url, {
+    method, credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload)});
+  if(res.status===401){ showLogin(); return null; }
+  if(!res.ok){
+    const body = await res.json().catch(()=>({}));
+    const d = body.detail;
+    const msg = typeof d==='string' ? d
+              : (d && (d.message || (d[0]&&d[0].msg))) || `failed (${res.status})`;
+    toast(msg, true);
+    return null;
+  }
+  return res.json();
+}
+
+async function saveUser(){
+  const creating = umEdit === 'new';
+  const name = ($('#umName').value||'').trim();
+  const role = $('#umRole').value;
+  const units = $$('#users .umUnit').filter(c=>c.checked).map(c=>c.value);
+  if(!name){ toast('Display name is required', true); return; }
+  if(!units.length){ toast('Select at least one org unit', true); return; }
+
+  let out;
+  if(creating){
+    const email = ($('#umEmail').value||'').trim();
+    if(!email){ toast('Email is required', true); return; }
+    out = await umSend('/api/users', 'POST',
+      {email, display_name:name, role_code:role, org_unit_codes:units});
+  }else{
+    out = await umSend(`/api/users/${umEdit}`, 'PATCH',
+      {display_name:name, role_code:role, org_unit_codes:units});
+  }
+  if(!out) return;
+  toast(creating ? 'User created' : 'User updated');
+  umEdit = null;
+  await loadUsers();
+}
+
+async function setUserActive(id, active){
+  const out = await umSend(`/api/users/${id}`, 'PATCH', {is_active: active});
+  if(!out) return;
+  toast(active ? 'User reactivated' : 'User deactivated');
+  await loadUsers();
+}
+
 /* ---------- router ---------- */
 const TITLES={dash:'Portfolio Dashboard',pursuits:'Pursuits',staffing:'Staffing Capacity',
   revenue:'Revenue & Profit Projection',bp:'B&P and Investment',sandbox:'Scenario Sandbox',
-  targets:'Targets & Budgets',import:'Import'};
+  targets:'Targets & Budgets',import:'Import',users:'User Management'};
 let cur='dash';
 function emptyState(){
   restoreViewContainers();
@@ -2675,6 +2857,13 @@ function emptyState(){
 
 function render(){
   restoreViewContainers();
+  // Admin-only nav entry. Cosmetic: routers/users.py enforces the real
+  // gate server-side on every endpoint, so revealing this link is about
+  // not showing a dead-end screen, never about access control.
+  const adminNav = isAdmin();
+  const navU = $('#navUsers'), navL = $('#navAdminLbl');
+  if(navU) navU.hidden = !adminNav;
+  if(navL) navL.hidden = !adminNav;
   // Views assume a non-empty portfolio in several places -- peak staffing
   // sorts and takes [0], the dashboard indexes the plan by year. Guard once
   // here instead of scattering null checks through all of them.
@@ -2687,7 +2876,13 @@ function show(v){cur=v;
   $('#'+v).classList.add('on');
   document.querySelector(`#nav a[data-v="${v}"]`).classList.add('on');
   $('#title').textContent=TITLES[v];tools(v);window.scrollTo(0,0);}
-$$('#nav a').forEach(a=>a.onclick=()=>{presenceStop();show(a.dataset.v);});
+$$('#nav a').forEach(a=>a.onclick=()=>{
+  presenceStop();
+  show(a.dataset.v);
+  // Loaded on demand, not as part of bootstrap: only an admin can use
+  // this screen, and most sessions never open it.
+  if(a.dataset.v==='users') loadUsers();
+});
 /* ONE delegated handler for every control that used to carry an inline
    onclick="..." attribute in a rendered HTML string (the dashboard
    summary links, the "Clear filter" button, every questionnaire "?"

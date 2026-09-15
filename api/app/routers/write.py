@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..auth import Principal, current_principal, require_role
 from ..db import fetch_all, fetch_one, tenant_tx
-from ..plan_scope import (auto_clear_dependents_of_cancelled,
+from ..plan_scope import (auto_clear_dependents_of_outcome,
                           resolve_plan_year_node, resolve_pursuit_dependency,
                           resolve_pursuit_org_node, resolve_pursuit_owner)
 from ..recalc import (active_questionnaire_version_id, latest_questionnaire_id,
@@ -693,25 +693,23 @@ async def set_outcome(
              set_bid, p.user_id, pursuit_id, p.user_id))
         updated["reopened"] = body.outcome is None
 
-        # Newly cancelled (a transition INTO CANCELLED, not e.g. an
-        # idempotent re-set of an already-cancelled pursuit): every OTHER
-        # pursuit depending on this one has its dependency auto-cleared,
-        # same real write path and same explicit non-silent surfacing as
-        # the sole-source/LPTA reverse-transition auto-clear above --
-        # confirmed against the real VBA source (ClearDependencyRefs_).
-        # See plan_scope.auto_clear_dependents_of_cancelled's own
-        # docstring for why no new blend math is needed here.
-        # Newly cancelled (a transition INTO CANCELLED, not e.g. an
-        # idempotent re-set of an already-cancelled pursuit): every OTHER
-        # pursuit depending on this one has its dependency auto-cleared,
-        # same real write path and same explicit non-silent surfacing as
-        # the sole-source/LPTA reverse-transition auto-clear above --
-        # confirmed against the real VBA source (ClearDependencyRefs_).
-        # See plan_scope.auto_clear_dependents_of_cancelled's own
-        # docstring for why no new blend math is needed here.
+        # Newly CANCELLED or NO_BID (a transition INTO one of these, not
+        # e.g. an idempotent re-set of an already-cancelled pursuit):
+        # every OTHER pursuit depending on this one has its dependency
+        # auto-cleared, same real write path and same explicit
+        # non-silent surfacing as the sole-source/LPTA reverse-transition
+        # auto-clear above -- confirmed against the real VBA source
+        # (ClearDependencyRefs_) for CANCELLED, extended to NO_BID for
+        # the same "no defined blend behavior" reason (2026-09-14). NO_BID
+        # is currently unreachable through this endpoint (OutcomeIn's own
+        # validator below only accepts WON/LOST/CANCELLED/null) -- wired
+        # up anyway for defense in depth, so nothing here needs revisiting
+        # if that validator ever changes. See
+        # plan_scope.auto_clear_dependents_of_outcome's own docstring for
+        # why no new blend math is needed here.
         updated["dependents_cleared"] = (
-            auto_clear_dependents_of_cancelled(cur, pursuit_id, p.user_id)
-            if body.outcome == "CANCELLED" and row["outcome"] != "CANCELLED"
+            auto_clear_dependents_of_outcome(cur, pursuit_id, p.user_id)
+            if body.outcome in ("CANCELLED", "NO_BID") and row["outcome"] != body.outcome
             else [])
     return updated
 

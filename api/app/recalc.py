@@ -111,16 +111,15 @@ def apply_dependency_blend(cur, pursuit_id: str, predecessor_id: str) -> None:
         exists in AERO/DEMO today to re-verify that recursive step
         against, but it follows directly from reading the same column
         this function itself writes).
-      - predecessor CANCELLED: 0.0, same as LOST -- decided 2026-09-09
-        against the real VBA source (ClearDependencyRefs_): a cancelled
-        predecessor auto-clears the dependency entirely (write.py's
-        set_outcome), so this branch only matters defensively for
-        already-inconsistent data. See its own comment below.
-
-    No real NO_BID predecessor has a real dependent in AERO/DEMO today
-    (confirmed live), and the source spreadsheet formula has no branch
-    for this case -- raises rather than inventing one. If this is ever
-    hit for real, it needs an actual decision, not a silent guess.
+      - predecessor CANCELLED or NO_BID: 0.0, same as LOST -- CANCELLED
+        decided 2026-09-09, NO_BID decided 2026-09-14, both against the
+        real VBA source (ClearDependencyRefs_) and the same reasoning:
+        a predecessor reaching either outcome auto-clears the dependency
+        entirely (write.py's set_outcome, via plan_scope.
+        auto_clear_dependents_of_outcome), so this branch only matters
+        defensively for already-inconsistent data (a dependency that
+        somehow still points at an already-decided predecessor). See
+        this function's own comment below.
 
     Recorded on the BASE row only (blended_pwin's own column comment).
     pwin is set to the SAME blended value there, matching the original
@@ -158,35 +157,22 @@ def apply_dependency_blend(cur, pursuit_id: str, predecessor_id: str) -> None:
 
     if outcome == "WON":
         dep_factor = 1.0
-    elif outcome in ("LOST", "CANCELLED"):
-        # CANCELLED: decided (2026-09-09) against the real VBA source
-        # (ClearDependencyRefs_) -- a cancelled predecessor auto-clears
+    elif outcome in ("LOST", "CANCELLED", "NO_BID"):
+        # CANCELLED (2026-09-09) and NO_BID (2026-09-14): both decided
+        # against the real VBA source (ClearDependencyRefs_) -- a
+        # predecessor reaching either outcome auto-clears
         # depends_on_pursuit_id on every dependent (write.py's
-        # set_outcome, via plan_scope.auto_clear_dependents_of_cancelled),
+        # set_outcome, via plan_scope.auto_clear_dependents_of_outcome),
         # so in normal operation this function is never even called with
-        # a CANCELLED predecessor any more (the dependent has no
-        # dependency left by the time anything here would run). This
+        # a CANCELLED or NO_BID predecessor any more (the dependent has
+        # no dependency left by the time anything here would run). This
         # branch is defensive only, for a pursuit whose dependency
-        # somehow still points at an already-cancelled predecessor (e.g.
+        # somehow still points at an already-decided predecessor (e.g.
         # data from before this fix existed) -- treated the same as
         # LOST/dep_factor=0.0, which is exactly "revert to this
         # pursuit's own Base Pwin", matching what the auto-clear path
         # itself produces.
         dep_factor = 0.0
-    elif outcome == "NO_BID":
-        # Out of scope for the CANCELLED fix above -- no auto-clear
-        # exists for a NO_BID predecessor, so the hard lock stays until
-        # that gets its own real decision (no real NO_BID predecessor
-        # with a real dependent exists in AERO/DEMO today, confirmed
-        # live -- see this module's own docstring).
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "This pursuit's depended-on predecessor is NO_BID -- the "
-            "real spreadsheet formula this blend is based on has no "
-            "defined behavior for a no-bid predecessor (never occurred "
-            "in the migrated production data either), so this needs a "
-            "real decision rather than an invented rule. Pwin for this "
-            "pursuit was not updated.")
     else:
         pred_row = fetch_one(cur, """
             SELECT pwin FROM pwin_assessment

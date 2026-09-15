@@ -7,8 +7,10 @@ block inline script even if an escaping site is ever missed.
 Confirmed real by the security audit (2026-09-09): PursuitPatch.name had
 no content restriction, index.html had no HTML-escaping helper at all,
 and server data was interpolated straight into innerHTML. Proven live
-with `<i data-audit-probe=1>probe</i>` on pursuit 1060's name, returned
-raw by /api/bootstrap.
+with `<i data-audit-probe=1>probe</i>` on a real pursuit's name (1060 at
+the time of the original audit; this suite now runs against its own
+dedicated fixture 1062 -- see FIXTURE_OPP below), returned raw by
+/api/bootstrap.
 
 This test plants that EXACT audit payload (plus an execution attempt,
 <img onerror>) on a real pursuit's name via the real PATCH endpoint,
@@ -42,7 +44,20 @@ const args = process.argv.slice(2);
 const BASE = (args.includes('--base') ? args[args.indexOf('--base') + 1] : null)
   || 'http://localhost:8001';
 const EMAIL = 'aero.admin@demoaero.test';
-const FIXTURE_OPP = '1060';        // real AERO Best Value pursuit, open
+// DEDICATED, SINGLE-PURPOSE fixture (2026-09-15). This suite does the most
+// disruptive mutation of any suite in the harness -- it PATCHes the
+// pursuit's NAME to an XSS payload and only restores it in a finally --
+// so it must not share a pursuit with any suite that reads or asserts on
+// that name. Previously 1060, which was simultaneously serving
+// test_lpta_eval_type, test_questionnaire_answers and
+// test_dependency_restrictions. 1062 is used by this suite and nothing
+// else; confirmed unreferenced anywhere else in the harness before
+// claiming it. Don't reuse it elsewhere.
+const FIXTURE_OPP = '1062';        // real AERO Best Value pursuit, open, Pre-BH
+// NOT dedicated, deliberately: this suite only READS 1073 (renders its
+// Depends-on picker) and never writes to it, so sharing it with
+// test_blended_pwin -- which does recalculate it -- carries no ordering
+// risk in either direction. Left shared on purpose, not overlooked.
 const DEPENDENT_OPP = '1073';      // real dependent pursuit whose Depends-on picker is editable
 const PROBE = '<i data-audit-probe=1>probe</i>';                 // the audit's exact payload
 const EXEC = '<img src=x onerror="window.__xss=1">';            // plus an execution attempt

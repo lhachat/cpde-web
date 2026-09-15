@@ -27,9 +27,12 @@ cannot be exercised against real data (would require inventing a
 fixture the real system has never actually had).
 
 Fixtures (real pursuits, all genuinely Pre-BH and open):
-  1055 (AERO) -- no dependency (existing LPTA fixture, reused for its
-                 "not a dependent pursuit at all" property, not its
-                 LPTA-ness)
+  1055 (AERO) -- no dependency. Chosen for its "not a dependent pursuit
+                 at all" property; its P2=LPTA answer is incidental and
+                 nothing here depends on it. Sole owner of 1055 as of
+                 2026-09-15 -- test_lpta_eval_type used to share it and
+                 also recalculate it, and has since moved to its own
+                 dedicated 1066/1063.
   1073 (AERO) -- dependency on 1058, predecessor still open
   61   (DEMO) -- dependency on 54, predecessor decided WON
   53   (DEMO) -- dependency on 11, predecessor decided LOST

@@ -520,14 +520,24 @@ def resolve_pursuit_dependency(cur, pursuit_id, user_id, depends_on_uid: str) ->
     return target_id
 
 
-def auto_clear_dependents_of_cancelled(cur, predecessor_id, user_id) -> list[dict]:
-    """Called when a pursuit's outcome is set to CANCELLED (write.py's
-    set_outcome). Confirmed against the real VBA source (ClearDependencyRefs_):
-    a cancelled predecessor auto-clears depends_on_pursuit_id on every
-    OTHER pursuit that currently points at it -- same real write path as
-    the sole-source/LPTA reverse-transition auto-clear (write.py's own
+def auto_clear_dependents_of_outcome(cur, predecessor_id, user_id) -> list[dict]:
+    """Called when a pursuit's outcome is set to CANCELLED or NO_BID
+    (write.py's set_outcome) -- both terminal-without-a-real-decision
+    outcomes the dependency-blend formula has no defined behavior for
+    (see apply_dependency_blend's own docstring). Confirmed against the
+    real VBA source (ClearDependencyRefs_) for CANCELLED: a cancelled
+    predecessor auto-clears depends_on_pursuit_id on every OTHER pursuit
+    that currently points at it -- same real write path as the
+    sole-source/LPTA reverse-transition auto-clear (write.py's own
     dependency_cleared field just above set_outcome in this file's
-    caller), never a silent side effect.
+    caller), never a silent side effect. Extended to NO_BID (2026-09-14)
+    for consistency and defense in depth -- not an active bug at the
+    time, since OutcomeIn's own validator has never allowed NO_BID
+    through this endpoint (no real pursuit could reach that state via
+    the live API), but the same "no defined blend behavior" reasoning
+    applies identically to both outcomes, so both get the same
+    treatment rather than leaving one silently inconsistent with the
+    other.
 
     A cleared dependent needs no new blend math: apply_dependency_blend's
     own formula collapses to "pwin = base_pwin, blended_pwin = NULL" the
